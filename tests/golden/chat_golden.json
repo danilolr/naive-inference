@@ -1,0 +1,96 @@
+[
+ {
+  "messages": [
+   {
+    "role": "user",
+    "content": "Hello!"
+   }
+  ],
+  "thinking": true,
+  "rendered": "<|im_start|>user\nHello!<|im_end|>\n<|im_start|>assistant\n<think>\n"
+ },
+ {
+  "messages": [
+   {
+    "role": "user",
+    "content": "Hello!"
+   }
+  ],
+  "thinking": false,
+  "rendered": "<|im_start|>user\nHello!<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+ },
+ {
+  "messages": [
+   {
+    "role": "system",
+    "content": "You are a helpful assistant."
+   },
+   {
+    "role": "user",
+    "content": "Hi there"
+   }
+  ],
+  "thinking": true,
+  "rendered": "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nHi there<|im_end|>\n<|im_start|>assistant\n<think>\n"
+ },
+ {
+  "messages": [
+   {
+    "role": "system",
+    "content": "You are helpful."
+   },
+   {
+    "role": "user",
+    "content": "What is 2+2?"
+   },
+   {
+    "role": "assistant",
+    "content": "4"
+   },
+   {
+    "role": "user",
+    "content": "And 3+3?"
+   }
+  ],
+  "thinking": true,
+  "rendered": "<|im_start|>system\nYou are helpful.<|im_end|>\n<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\n4<|im_end|>\n<|im_start|>user\nAnd 3+3?<|im_end|>\n<|im_start|>assistant\n<think>\n"
+ },
+ {
+  "messages": [
+   {
+    "role": "user",
+    "content": "Think please"
+   },
+   {
+    "role": "assistant",
+    "content": "reasoning here\n</think>\n\nThe answer is 42."
+   },
+   {
+    "role": "user",
+    "content": "Thanks"
+   }
+  ],
+  "thinking": true,
+  "rendered": "<|im_start|>user\nThink please<|im_end|>\n<|im_start|>assistant\nThe answer is 42.<|im_end|>\n<|im_start|>user\nThanks<|im_end|>\n<|im_start|>assistant\n<think>\n"
+ },
+ {
+  "messages": [
+   {
+    "role": "user",
+    "content": "  padded content  "
+   }
+  ],
+  "thinking": false,
+  "rendered": "<|im_start|>user\npadded content<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+ },
+ {
+  "messages": [
+   {
+    "role": "user",
+    "content": "Olá, mundo! Ação e coração."
+   }
+  ],
+  "thinking": true,
+  "rendered": "<|im_start|>user\nOlá, mundo! Ação e coração.<|im_end|>\n<|im_start|>assistant\n<think>\n"
+ }
+]

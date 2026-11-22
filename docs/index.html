@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>naive-inference — a from-scratch LLM inference engine in Python + NumPy</title>
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script defer src="assets/app.js"></script>
+</head>
+<body>
+<header class="topnav">
+  <div class="brand">naive<span>-inference</span></div>
+  <nav>
+    <a href="index.html">Overview</a>
+    <a href="concepts.html">LLM Concepts</a>
+    <a href="implementation.html">Implementation</a>
+    <a href="SPEC.md">Spec (raw)</a>
+  </nav>
+  <div class="spacer"></div>
+  <button id="theme-toggle">☀️ light</button>
+</header>
+
+<div class="layout">
+<aside class="toc"><div class="toc-title">On this page</div><div id="toc"></div></aside>
+<main>
+
+<h1>A from-scratch LLM inference engine in Python + NumPy</h1>
+<div class="callout info">
+  <div class="callout-title">Study &amp; learning project — not a performance project</div>
+  The goal is to understand how an LLM inference engine works from the inside by
+  building one from scratch. The code prioritizes <strong>clarity and correctness
+  over speed</strong> — not production use or benchmark chasing. Created with the
+  assistance of <strong>Qwen4.0 Max Preview</strong> and <strong>Opencode</strong>.
+</div>
+<p class="lede">
+  naive-inference runs <strong>Qwen3.8-27B</strong> — a 2026 hybrid-attention model —
+  in Python + NumPy, with <strong>optional CUDA via CuPy</strong>. The engine is written
+  once against a NumPy-compatible namespace (<code>arrays.xp</code>), so the same code
+  path scales from a simple PC to a <strong>DGX Spark</strong>. Every piece was built
+  from scratch for learning: the safetensors loader, the BPE tokenizer, both attention
+  mechanisms, sampling, a chat CLI, and an OpenAI-compatible server. Correctness was
+  proven layer-by-layer against Hugging Face.
+</p>
+
+<div class="cards">
+  <div class="card"><div class="big">27B</div><p>parameters, fully config-driven — runs on a CPU with weights memory-mapped, or on a GPU when they fit. The 4B dev model is the same code, zero changes.</p></div>
+  <div class="card"><div class="big">64</div><p>decoder layers: 48 linear-attention (Gated DeltaNet) + 16 full-attention, all implemented by hand.</p></div>
+  <div class="card"><div class="big">1</div><p>code path — every module reads <code>arrays.xp</code>, bound to NumPy (CPU) or CuPy (CUDA) at startup. Same math from laptop to DGX Spark.</p></div>
+  <div class="card"><div class="big">0</div><p>torch/transformers dependencies in the engine — only NumPy + regex. The HF oracle lives in a separate directory with its own venv.</p></div>
+</div>
+
+<h2 id="start-here">Start here</h2>
+<div class="cards">
+  <a class="card" href="concepts.html" style="color:inherit">
+    <h3>📚 LLM Concepts</h3>
+    <p>For experienced developers new to LLMs. What tokens, attention, KV caches,
+    state-space models, and the delta rule actually are — with formulas and
+    <strong>7 interactive demos</strong> (rotate RoPE vectors, step through the delta
+    rule, play with sampling, watch memory grow with context).</p>
+  </a>
+  <a class="card" href="implementation.html" style="color:inherit">
+    <h3>🔧 Implementation Guide</h3>
+    <p>How the engine is built, module by module, with Python code excerpts and
+    <strong>links to every source file</strong>. Numerics policy, memory-aware
+    placement, the oracle verification methodology, and the 18-pitfall checklist.</p>
+  </a>
+</div>
+
+<h2 id="architecture">Overview — the hybrid architecture</h2>
+<p>
+  Qwen3.8-27B (<code>model_type: qwen3_5</code>) is <strong>hybrid</strong>: most layers
+  replace softmax attention with a <em>recurrent</em> linear-attention mechanism whose
+  memory is a fixed-size matrix. Every 4th layer keeps classic full attention.
+  Development happens against <strong>Qwen3.5-4B</strong> (same architecture, smaller
+  dimensions); running the 27B model is a matter of pointing at a different weights
+  directory.
+</p>
+<div class="pipeline">
+  <span class="stage">token ids</span><span class="arrow">→</span>
+  <span class="stage">embedding</span><span class="arrow">→</span>
+  <span class="stage">[linear ×3 → full] ×16</span><span class="arrow">→</span>
+  <span class="stage">RMSNorm</span><span class="arrow">→</span>
+  <span class="stage">lm_head</span><span class="arrow">→</span>
+  <span class="stage">logits [248320]</span><span class="arrow">→</span>
+  <span class="stage">sample → next token</span>
+</div>
+<p>
+  The payoff: long context is cheap. Full-attention layers need a KV cache that grows
+  with the sequence; linear-attention layers need only a constant ~3 MB state each.
+  Try it yourself in the <a href="concepts.html#hybrid">memory calculator</a>.
+</p>
+
+<div class="widget">
+  <div class="widget-title">Interactive · layer explorer</div>
+  <div class="widget-sub">The real layer pattern of both models. Click any layer to see its mechanism, dimensions, and state.</div>
+  <div class="controls">
+    <div class="control"><label>model</label>
+      <select id="layer-model"><option>4B</option><option selected>27B</option></select>
+    </div>
+    <span><span class="badge linear">linear attention</span> <span class="badge full">full attention</span></span>
+  </div>
+  <div id="layer-grid" class="layer-grid"></div>
+  <div id="layer-info" class="readout"></div>
+</div>
+
+<h2 id="status">Project status — all milestones complete</h2>
+<p>Every milestone was validated against a Hugging Face oracle (fp32 where it fits,
+bf16 for the 27B). Measured on the dev host: i7-12700, 62 GB RAM, RTX 4060 8 GB.</p>
+<table>
+  <tr><th>Milestone</th><th>Deliverable</th><th>Verification</th></tr>
+  <tr><td><span class="badge ok">M0 ✓</span></td><td>safetensors mmap loader (zero-copy bf16 <code>uint16</code> views), config, byte-level BPE tokenizer</td><td>HF <code>tokenizers</code> goldens: NFC, CJK, emoji, special tokens, both models' tokenizers</td></tr>
+  <tr><td><span class="badge ok">M1 ✓</span></td><td>zero-centered RMSNorm + SwiGLU MLP + one full-attention layer</td><td>all 36 activations (prefill + cached decode) match the fp32 oracle, maxAbs ~1e-5; prefill/incremental self-consistency</td></tr>
+  <tr><td><span class="badge ok">M2 ✓</span></td><td>one Gated DeltaNet (linear-attention) layer</td><td>all 46 activations/states match, maxAbs ~1e-5; the recurrence cross-validates the model's chunked prefill formulation</td></tr>
+  <tr><td><span class="badge ok">M3 ✓</span></td><td>full forward on 4B + greedy generation</td><td>20-token sequence identical to the oracle; prefill + per-step logits maxAbs ~5e-5; ~1.7 tok/s on CPU fp32 (BLAS)</td></tr>
+  <tr><td><span class="badge ok">M4 ✓</span></td><td>ChatML template + interactive chat REPL</td><td>validated vs HF <code>apply_chat_template</code>: thinking on/off, reasoning effort, history think-stripping; streaming, UTF-8-safe incremental decoding</td></tr>
+  <tr><td><span class="badge ok">M5 ✓</span></td><td>Qwen3.8-27B, zero code changes</td><td>1199 tensors / 18 shards, untied embeddings; greedy tokens identical to the bf16 oracle across all 64 layers</td></tr>
+  <tr><td><span class="badge ok">CUDA ✓</span></td><td>single NumPy/CuPy code path</td><td>CPU↔GPU parity verified on an RTX 4060 (synthetic models); real-weight GPU validation on DGX Spark</td></tr>
+  <tr><td><span class="badge ok">Server ✓</span></td><td>OpenAI-compatible API (<code>serve</code>)</td><td>SSE streaming + <code>reasoning_content</code> separation, validated live</td></tr>
+</table>
+
+<h2 id="hardware">Hardware adaptation — simple PC to DGX Spark</h2>
+<p>
+  The engine adapts to the available memory and compute automatically: only the backend
+  (NumPy vs CuPy) and the weight dtype (fp32 vs bf16) change, chosen from a memory budget
+  at load (<code>Model.load(device="auto", weight_dtype="auto")</code>).
+</p>
+<ul>
+  <li><strong>fp32 weights when they fit</strong> — each matrix is converted from bf16
+      <em>once</em> at load; matmul reads fp32 directly (BLAS on CPU, cuBLAS on CUDA).
+      The fast path.</li>
+  <li><strong>bf16 weights otherwise</strong> — matrices stay <code>uint16</code> and are
+      converted inside each matmul. Half the memory. On CPU they are zero-copy mmap
+      views: a 55 GB checkpoint loads in ~0.2 s and only touched pages consume RAM —
+      this is what lets a 62 GB host run the 27B model at all.</li>
+  <li><strong>CPU</strong> — NumPy matmul uses multithreaded BLAS; tune with
+      <code>OPENBLAS_NUM_THREADS</code> / <code>OMP_NUM_THREADS</code>.</li>
+  <li><strong>DGX Spark</strong> (GB10, ARM, CUDA 13, 128 GB unified memory) — the 27B
+      model fits in fp32 (~108 GB) in unified memory: weights converted once, matmul on
+      cuBLAS, no per-call conversion and no disk page faults. Install
+      <code>cupy-cuda13x[ctk]</code>; the engine code is unchanged.</li>
+  <li><strong>Small GPU</strong> (e.g. RTX 4060 8 GB) — 4B bf16 (~9.3 GB) exceeds VRAM,
+      so <code>auto</code> falls back to CPU. CUDA is still exercised via synthetic
+      models and layer-level parity tests.</li>
+</ul>
+<table>
+  <tr><th>Model</th><th>Backend</th><th>Weights</th><th class="num">Decode speed</th><th>Notes</th></tr>
+  <tr><td>4B</td><td>CPU</td><td>fp32 in RAM</td><td class="num">~1.7 tok/s</td><td>BLAS multithreaded</td></tr>
+  <tr><td>4B</td><td>CPU</td><td>bf16 mmap</td><td class="num">slower</td><td>per-matmul conversion</td></tr>
+  <tr><td>27B</td><td>CPU</td><td>bf16 mmap</td><td class="num">~110 s/token</td><td>55 GB page faults + conversion</td></tr>
+  <tr><td>4B/27B</td><td>CUDA (Spark)</td><td>fp32 unified</td><td class="num">fast path</td><td>convert once, cuBLAS</td></tr>
+</table>
+<p>Full guide: <a href="HARDWARE.md">docs/HARDWARE.md</a>.</p>
+
+<h2 id="docs">Documentation</h2>
+<ul>
+  <li><a href="SPEC.md">docs/SPEC.md</a> — the engine specification: architecture math,
+      numerics policy (NumPy/CuPy), tensor names, the 18-item pitfall checklist. Read it
+      first; the code follows it section by section.</li>
+  <li><a href="IMPLEMENTATION.md">docs/IMPLEMENTATION.md</a> — code walkthrough, file by
+      file (the <a href="implementation.html">interactive version</a> adds source links).</li>
+  <li><a href="HARDWARE.md">docs/HARDWARE.md</a> — running from a simple PC to a DGX
+      Spark: placement logic, CPU tuning, Spark validation procedure.</li>
+  <li><a href="../README.md">README.md</a> — status, layout, build/test/usage, oracle
+      commands.</li>
+</ul>
+
+<h2 id="layout">Layout</h2>
+<pre><code class="language-text">naive_infer/            ENGINE (pure NumPy/CuPy + regex; never imports torch)
+  arrays.py             backend selection (numpy/cupy), bf16&lt;-&gt;fp32, device moves
+  safetensors.py        header parse, mmap, zero-copy uint16 views, shards
+  config.py             config.json parsing + validation, derived dimensions
+  weights.py            tensor resolution, memory-aware placement, linear()
+  ops.py                RMSNorm (2 variants), SiLU, softmax, RoPE, L2norm, ...
+  state.py              KVCache, ConvState, SSMState, SeqState
+  forward.py            full attention, Gated DeltaNet, MLP, whole forward
+  model.py              Model: load, embed, forward, generate/generate_stream
+  sampling.py           greedy, temperature, top-k, top-p
+  tokenizer/            NFC, regex pretokenizer, byte-level BPE, ChatML template
+  server.py             OpenAI-compatible HTTP API (stdlib http.server, SSE)
+  cli.py                inspect, tokenize, embeddump, generate, chat, serve
+oracle/                 ORACLE — separate deps (torch/transformers/tokenizers)
+  m0_dump.py ... m5_dump.py   ground-truth dumps (.npy) and goldens
+  dumps/                oracle output (git-ignored; regenerate via oracle/ scripts)
+  requirements.txt      oracle-only dependencies (full); requirements-base.txt (M0/M4)
+tests/                  pytest: unit + oracle comparison + CPU/GPU parity
+  golden/               tokenizer/chat goldens (generated by the oracle; tracked)
+docs/                   SPEC.md, IMPLEMENTATION.md, HARDWARE.md + HTML site</code></pre>
+<p>
+  Engine/oracle separation is enforced: <code>tests/test_no_oracle_deps.py</code> fails
+  if any <code>naive_infer/</code> module imports torch/transformers/tokenizers.
+</p>
+
+<h2 id="quickstart">Build, test, usage</h2>
+<pre><code class="language-sh"># Python 3.10+ and uv; the engine needs only NumPy + regex (CUDA optional)
+uv venv                                    # creates .venv
+uv pip install -r requirements.txt -e .    # CPU engine + pytest + CLI
+# optional CUDA (pick ONE matching your platform):
+uv pip install -r requirements-cuda12.txt  # x86 + CUDA 12 driver (e.g. RTX 4060)
+uv pip install -r requirements-cuda13.txt  # DGX Spark (ARM + CUDA 13)
+
+source .venv/bin/activate
+pytest                             # unit + oracle tests (skip if weights absent)</code></pre>
+<pre><code class="language-sh">./download-models Qwen3.5-4B        # fetch into ./models (default NAIVE_INFER_MODELS root)
+
+# Model summary (-tensors lists weights, -embed ID inspects a row)
+naive-infer inspect -model Qwen3.5-4B
+
+# Encode text (-pieces shows raw byte-level pieces) / decode ids
+naive-infer tokenize -model Qwen3.5-4B -text "Olá, mundo!" -pieces
+
+# Continue text (greedy by default; -temp/-top-k/-top-p enable sampling)
+naive-infer generate -model Qwen3.5-4B -text "Once upon a time" -max-new 32
+
+# Interactive chat (ChatML, streaming; /exit and /reset)
+naive-infer chat -model Qwen3.5-4B -system "You are helpful." -no-think
+
+# OpenAI-compatible API server (SSE streaming, reasoning_content split)
+naive-infer serve -model Qwen3.5-4B -addr 127.0.0.1:8080</code></pre>
+<p>
+  <code>-device {auto,cpu,cuda}</code> and <code>-weight-dtype {auto,bf16,fp32}</code>
+  control placement. Models live in <code>./models/&lt;NAME&gt;</code> (the default
+  <code>NAIVE_INFER_MODELS</code> root); fetch them with
+  <code>./download-models Qwen3.5-4B</code> (or <code>Qwen3.8-27B</code>;
+  <code>--config-only</code> for tokenizer-only). Weights: ~9.3 GB bf16 for 4B,
+  ~55.6 GB for 27B. See the <a href="../README.md">README</a> for details and the
+  <a href="implementation.html#oracle">oracle section</a> for the verification workflow.
+</p>
+
+<div class="footer">
+  naive-inference · a from-scratch LLM inference engine in Python + NumPy (optional CUDA) ·
+  a learning project (not a performance project) · <strong>MIT licensed</strong>
+  (see <a href="../LICENSE">LICENSE</a>) · created with the assistance of Qwen4.0 Max Preview and Opencode.
+  Formulas render with KaTeX; code highlighting with highlight.js (both via CDN — offline,
+  formulas show as LaTeX source and code stays readable).
+</div>
+
+</main>
+</div>
+</body>
+</html>

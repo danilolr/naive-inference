@@ -1,0 +1,4 @@
+# Optional CUDA backend for the DGX Spark (ARM aarch64 + CUDA 13).
+# The [ctk] extra pulls the CUDA toolkit headers CuPy 14 needs to JIT kernels.
+# Install:  uv pip install -r requirements-cuda13.txt
+cupy-cuda13x[ctk]>=13.6

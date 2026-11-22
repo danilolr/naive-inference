@@ -1,0 +1,63 @@
+# ---- Python bytecode / build artifacts ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+.eggs/
+build/
+dist/
+wheels/
+pip-wheel-metadata/
+.installed.cfg
+MANIFEST
+
+# ---- Virtual environments ----
+.venv/
+.venv-oracle/
+venv/
+env/
+ENV/
+
+# ---- uv ----
+# uv.lock is intentionally NOT ignored: commit it for reproducible installs if
+# you adopt `uv sync`. The requirements.txt workflow does not generate one.
+# uv's package cache lives outside the project (~/.cache/uv), nothing to ignore.
+
+# ---- Test / coverage / linter caches ----
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+.mypy_cache/
+.ruff_cache/
+.cache/
+
+# ---- Local model weights (large; fetch with ./download-models) ----
+models/
+*.safetensors
+
+# ---- Oracle dump output (large .npy; regenerate with the oracle/ scripts) ----
+oracle/dumps/
+
+# ---- Logs / scratch / notebooks ----
+*.log
+.ipynb_checkpoints/
+
+# ---- OS / editor ----
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.sublime-workspace
+
+# ---- NOTE: tests/golden/*.json IS tracked (small tokenizer/chat fixtures) ----
+# oracle/dumps/ is git-ignored (~51 MB of .npy). Regenerate it with the oracle/
+# scripts (needs torch); the M1/M2/M3/M5 oracle tests skip until dumps exist.

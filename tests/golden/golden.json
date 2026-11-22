@@ -1,0 +1,340 @@
+[
+ {
+  "text": "Hello, world!",
+  "ids": [
+   9419,
+   11,
+   1814,
+   0
+  ],
+  "decoded": "Hello, world!"
+ },
+ {
+  "text": "Olá, mundo! Ação e coração.",
+  "ids": [
+   41304,
+   1886,
+   11,
+   27429,
+   0,
+   217838,
+   378,
+   178303,
+   13
+  ],
+  "decoded": "Olá, mundo! Ação e coração."
+ },
+ {
+  "text": "don't stop believing",
+  "ids": [
+   14572,
+   914,
+   2842,
+   32863
+  ],
+  "decoded": "don't stop believing"
+ },
+ {
+  "text": "abc123 45 6.78",
+  "ids": [
+   13290,
+   16,
+   17,
+   18,
+   220,
+   19,
+   20,
+   220,
+   21,
+   13,
+   22,
+   23
+  ],
+  "decoded": "abc123 45 6.78"
+ },
+ {
+  "text": "line1\nline2\n\nline3",
+  "ids": [
+   1021,
+   16,
+   198,
+   1021,
+   17,
+   271,
+   1021,
+   18
+  ],
+  "decoded": "line1\nline2\n\nline3"
+ },
+ {
+  "text": "  spaces  everywhere  ",
+  "ids": [
+   220,
+   12258,
+   220,
+   16360,
+   256
+  ],
+  "decoded": "  spaces  everywhere  "
+ },
+ {
+  "text": "The quick brown fox jumps over the lazy dog.",
+  "ids": [
+   760,
+   3841,
+   13477,
+   37550,
+   33075,
+   888,
+   279,
+   15217,
+   5388,
+   13
+  ],
+  "decoded": "The quick brown fox jumps over the lazy dog."
+ },
+ {
+  "text": "café naïve résumé",
+  "ids": [
+   895,
+   56868,
+   91603,
+   571,
+   238976
+  ],
+  "decoded": "café naïve résumé"
+ },
+ {
+  "text": "café naivë",
+  "ids": [
+   895,
+   56868,
+   4176,
+   340,
+   11831
+  ],
+  "decoded": "café naivë"
+ },
+ {
+  "text": "emoji: 🚀🔥",
+  "ids": [
+   36280,
+   25,
+   10838,
+   248,
+   222,
+   9008,
+   242,
+   98
+  ],
+  "decoded": "emoji: 🚀🔥"
+ },
+ {
+  "text": "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n",
+  "ids": [
+   248045,
+   846,
+   198,
+   12675,
+   248046,
+   198,
+   248045,
+   74455,
+   198
+  ],
+  "decoded": "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n"
+ },
+ {
+  "text": "mix of 'quotes' and \"double\"",
+  "ids": [
+   33911,
+   314,
+   359,
+   51492,
+   6,
+   321,
+   328,
+   4190,
+   1
+  ],
+  "decoded": "mix of 'quotes' and \"double\""
+ },
+ {
+  "text": "\t\r\n whitespace  nbsp",
+  "ids": [
+   4326,
+   35169,
+   220,
+   3966,
+   5496
+  ],
+  "decoded": "\t\r\n whitespace  nbsp"
+ },
+ {
+  "text": "a  b   c",
+  "ids": [
+   64,
+   220,
+   292,
+   256,
+   272
+  ],
+  "decoded": "a  b   c"
+ },
+ {
+  "text": "it's a TEST's",
+  "ids": [
+   275,
+   579,
+   264,
+   13209,
+   579
+  ],
+  "decoded": "it's a TEST's"
+ },
+ {
+  "text": "Hello\tworld",
+  "ids": [
+   9419,
+   73891
+  ],
+  "decoded": "Hello\tworld"
+ },
+ {
+  "text": "x y",
+  "ids": [
+   87,
+   3966,
+   88
+  ],
+  "decoded": "x y"
+ },
+ {
+  "text": "supercalifragilisticexpialidocious",
+  "ids": [
+   12410,
+   2867,
+   278,
+   331,
+   3965,
+   319,
+   4384,
+   4431,
+   518,
+   306,
+   74546
+  ],
+  "decoded": "supercalifragilisticexpialidocious"
+ },
+ {
+  "text": "日本語テキスト",
+  "ids": [
+   247359,
+   210342
+  ],
+  "decoded": "日本語テキスト"
+ },
+ {
+  "text": "Ελληνικά",
+  "ids": [
+   168953,
+   164594,
+   159778
+  ],
+  "decoded": "Ελληνικά"
+ },
+ {
+  "text": "a1b2c3",
+  "ids": [
+   64,
+   16,
+   65,
+   17,
+   66,
+   18
+  ],
+  "decoded": "a1b2c3"
+ },
+ {
+  "text": "  ",
+  "ids": [
+   256
+  ],
+  "decoded": "  "
+ },
+ {
+  "text": "\n\n\n",
+  "ids": [
+   1358
+  ],
+  "decoded": "\n\n\n"
+ },
+ {
+  "text": "end.",
+  "ids": [
+   400,
+   13
+  ],
+  "decoded": "end."
+ },
+ {
+  "text": "'s'tRE'VE",
+  "ids": [
+   579,
+   914,
+   762,
+   6,
+   4343
+  ],
+  "decoded": "'s'tRE'VE"
+ },
+ {
+  "text": "foo_bar-baz.qux",
+  "ids": [
+   7724,
+   13975,
+   1402,
+   1322,
+   16773,
+   87
+  ],
+  "decoded": "foo_bar-baz.qux"
+ },
+ {
+  "text": "100% (ok) [fine] {fine}",
+  "ids": [
+   16,
+   15,
+   15,
+   4,
+   318,
+   547,
+   8,
+   498,
+   59965,
+   60,
+   313,
+   59965,
+   92
+  ],
+  "decoded": "100% (ok) [fine] {fine}"
+ },
+ {
+  "text": "back\\slash",
+  "ids": [
+   1371,
+   59,
+   48569
+  ],
+  "decoded": "back\\slash"
+ },
+ {
+  "text": "zero\u0000one",
+  "ids": [
+   13749,
+   188,
+   588
+  ],
+  "decoded": "zero\u0000one"
+ }
+]

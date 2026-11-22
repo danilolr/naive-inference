@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LLM Concepts — naive-inference</title>
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script defer src="assets/app.js"></script>
+</head>
+<body>
+<header class="topnav">
+  <div class="brand">naive<span>-inference</span></div>
+  <nav>
+    <a href="index.html">Overview</a>
+    <a href="concepts.html">LLM Concepts</a>
+    <a href="implementation.html">Implementation</a>
+    <a href="SPEC.md">Spec (raw)</a>
+  </nav>
+  <div class="spacer"></div>
+  <button id="theme-toggle">☀️ light</button>
+</header>
+
+<div class="layout">
+<aside class="toc"><div class="toc-title">On this page</div><div id="toc"></div></aside>
+<main>
+
+<h1>LLM Concepts, for developers</h1>
+<p class="lede">
+  You know code. This page explains what a large language model actually computes —
+  no ML background assumed, every formula shown, and the tricky parts made
+  <strong>interactive</strong>. Everything here is grounded in the real
+  Qwen3.8-27B architecture that naive-inference runs.
+</p>
+
+<h2 id="next-token">1. What an LLM computes</h2>
+<p>
+  Strip away the hype and an LLM is a <strong>pure function</strong>:
+</p>
+<div class="formula-box">
+$$ f(\text{token}_1, \dots, \text{token}_n) \;\rightarrow\; \text{logits} \in \mathbb{R}^{V} $$
+</div>
+<p>
+  It takes a sequence of integer token ids and returns one score (<em>logit</em>) per
+  vocabulary entry — here \(V = 248{,}320\). The scores say "how plausible is each
+  token as the <em>next</em> one". Text generation is just calling this function in a loop:
+</p>
+<pre><code class="language-text">ids = tokenize(prompt)
+loop:
+    logits = model(ids)              # the expensive part
+    next   = sample(logits[-1])      # pick a token from the scores
+    ids.append(next)
+    until stop token or limit</code></pre>
+<p>Two phases matter for performance, and they behave very differently:</p>
+<ul>
+  <li><strong>Prefill</strong> — process the whole prompt at once. Many tokens share
+      each weight read, so this is <em>compute-bound</em> (matrix × matrix).</li>
+  <li><strong>Decode</strong> — generate one token at a time. Each step reads
+      <em>all</em> the weights to process a single token (matrix × vector), so it is
+      <em>memory-bandwidth-bound</em>. For 27B in bf16 that is ~55 GB read per token.
+      This is why decode is slow even on fast hardware, and why caching (below) exists.</li>
+</ul>
+<div class="callout info">
+  <div class="callout-title">Mental model</div>
+  The model has no memory between calls. Everything it "remembers" about your
+  conversation must be re-fed as tokens, or stored in explicit caches/state that the
+  engine carries between calls. The engine's job is largely <em>bookkeeping</em> around
+  one big stateless function.
+</div>
+
+<h2 id="tokens">2. Tokens, BPE, and embeddings</h2>
+<h3 id="bpe">Byte-Pair Encoding</h3>
+<p>
+  Models don't see characters or words — they see ids from a fixed vocabulary.
+  Qwen uses <strong>byte-level BPE</strong>, the GPT-2 scheme:
+</p>
+<ol>
+  <li><strong>Pretokenize</strong> the text with a regex (contractions like <code>'t</code>,
+      letter runs, single digits, punctuation, whitespace runs…). BPE never merges
+      across these boundaries.</li>
+  <li><strong>Byte-encode</strong>: every byte becomes a printable Unicode character
+      (space → <code>Ġ</code>, newline → <code>Ċ</code>, non-printable bytes → code points
+      ≥ 256). This guarantees <em>any</em> input — emoji, CJK, binary — is representable.</li>
+  <li><strong>Merge</strong>: start with one symbol per character; repeatedly find the
+      adjacent pair with the lowest <em>merge rank</em> (a learned priority list of
+      ~247k pairs) and merge all its occurrences. Stop when no pair is mergeable.</li>
+  <li>Look up each final symbol in the vocab → ids.</li>
+</ol>
+<p>
+  Example: <code>"the"</code> might be one token, while <code>"Olá"</code> becomes
+  <code>"Ol"</code> + <code>"á"</code> (two tokens) because the accented form is rarer
+  in training data. Frequent strings get short encodings; rare ones fall back to bytes.
+</p>
+
+<div class="widget" id="bpe-widget">
+  <div class="widget-title">Interactive · BPE merges</div>
+  <div class="widget-sub">A tiny synthetic merge table (8 rules) applied step by step. Space becomes Ġ. Watch the lowest-rank pair win each round.</div>
+  <div class="controls">
+    <input type="text" id="bpe-input" value="the cat sat" size="24">
+    <button id="bpe-run">Encode</button>
+  </div>
+  <div id="bpe-steps"></div>
+</div>
+
+<h3 id="special-tokens">Special tokens and chat templates</h3>
+<p>
+  Some ids are matched <em>literally</em> in the text, outside BPE:
+  <code>&lt;|im_start|&gt;</code> (248045), <code>&lt;|im_end|&gt;</code> (248046, also the stop token),
+  <code>&lt;|endoftext|&gt;</code> (248044), think-block markers (248068/69), tool-call markers, etc.
+  Conversations are serialized into <strong>ChatML</strong>:
+</p>
+<pre><code class="language-text">&lt;|im_start|&gt;system
+You are helpful.&lt;|im_end|&gt;
+&lt;|im_start|&gt;user
+What is 2+2?&lt;|im_end|&gt;
+&lt;|im_start|&gt;assistant
+&lt;think&gt;
+...model generates from here...</code></pre>
+<p>
+  With <em>thinking disabled</em>, the prompt pre-fills an empty think block
+  (<code>&lt;think&gt;\n\n&lt;/think&gt;\n\n</code>) so the model answers directly.
+  In multi-turn history, previous assistants' reasoning is stripped — the model
+  re-reads only its final answers.
+</p>
+<p>
+  Qwen3.8 adds <strong>reasoning effort</strong>: <code>reasoning_effort</code> ∈
+  {<code>xhigh</code> (default), <code>medium</code>, <code>low</code>}. It is
+  <em>prompt conditioning</em>, not a token budget: the template injects a
+  trained-on instruction into the system turn ("think carefully, validate
+  assumptions…" for xhigh; "keep thinking brief and focused…" for low; nothing
+  for medium). The engine exposes it via the API field and the CLI
+  <code>-effort</code> flag.
+</p>
+
+<h3 id="embeddings">Embeddings: ids → vectors</h3>
+<p>
+  The first model layer is a lookup table \(E \in \mathbb{R}^{V \times d}\)
+  (here \(248{,}320 \times 5120\), ~2.5 GB in bf16 — ~5% of the model!). Token id
+  \(i\) becomes row \(E[i]\), a \(d\)-dimensional vector. The <em>last</em> layer
+  (<code>lm_head</code>) projects back: \(\text{logits} = h \cdot W_{lm}^\top\).
+  In the 4B model both matrices are <strong>tied</strong> (the same tensor); in the
+  27B they are separate. Similar meanings end up in similar directions — that
+  geometry is learned, not designed.
+</p>
+
+<h2 id="block">3. The transformer block</h2>
+<p>
+  The vector \(h\) (the <strong>residual stream</strong>) flows through 64 layers.
+  Each layer adds two corrections:
+</p>
+<div class="formula-box">
+$$ h \leftarrow h + \text{Mixer}\big(\text{RMSNorm}(h)\big) $$
+$$ h \leftarrow h + \text{MLP}\big(\text{RMSNorm}(h)\big) $$
+</div>
+<p>
+  The Mixer is either <strong>full attention</strong> (§4) or <strong>linear
+  attention</strong> (§6) — that choice is the whole story of this architecture.
+  The additive structure matters: information can skip any layer unchanged, which
+  is what makes very deep networks trainable.
+</p>
+
+<h3 id="rmsnorm">RMSNorm (and Qwen's zero-centered twist)</h3>
+<p>Normalization keeps vector magnitudes stable across layers:</p>
+<div class="formula-box">
+$$ \text{RMSNorm}(x) = \frac{x}{\sqrt{\frac{1}{d}\sum_i x_i^2 + \epsilon}} \odot (1 + w) $$
+</div>
+<p>
+  Unlike LayerNorm there is no mean subtraction. And note the <strong>\((1+w)\)</strong>:
+  Qwen3.5 initializes \(w = 0\), so a fresh norm is the identity. Using plain \(w\)
+  (LLaMA style) silently zeroes everything — pitfall #1 in our checklist.
+  \(\epsilon = 10^{-6}\), computed in fp32.
+</p>
+
+<h3 id="swiglu">SwiGLU feed-forward</h3>
+<div class="formula-box">
+$$ \text{MLP}(x) = W_{down}\Big( \text{silu}(W_{gate}\, x) \odot (W_{up}\, x) \Big), \qquad \text{silu}(z) = z \cdot \sigma(z) $$
+</div>
+<p>
+  Two parallel projections (5120 → 17408), one passed through silu, multiplied
+  elementwise (the "gate" decides how much of the "up" signal passes), then projected
+  back down. This is where most parameters and most FLOPs live. No biases anywhere.
+</p>
+
+<h2 id="attention">4. Full attention</h2>
+<h3 id="qkv">Queries, keys, values</h3>
+<p>
+  Attention lets each token <em>look at</em> other tokens and pull information.
+  Three learned projections turn \(h\) into:
+</p>
+<ul>
+  <li><strong>Query</strong> \(q\): "what am I looking for?"</li>
+  <li><strong>Key</strong> \(k\): "what do I contain?" (each past token advertises one)</li>
+  <li><strong>Value</strong> \(v\): "what do I hand over if selected?"</li>
+</ul>
+<div class="formula-box">
+$$ \text{Attention}(Q, K, V) = \text{softmax}\!\left( \frac{Q K^\top}{\sqrt{d_{head}}} + M \right) V $$
+</div>
+<p>
+  Dot product = similarity; \(\sqrt{d_{head}}\) keeps scores from saturating the
+  softmax; \(M\) is the <strong>causal mask</strong> (\(-\infty\) above the diagonal —
+  token \(i\) may only see tokens \(\le i\), because at generation time the future
+  doesn't exist yet). Softmax turns each row into weights summing to 1; the output
+  is the weighted average of values.
+</p>
+
+<div class="widget">
+  <div class="widget-title">Interactive · causal attention</div>
+  <div class="widget-sub">6 tokens, random q/k vectors. Toggle between raw scores and post-softmax weights. Hover cells. The upper triangle is masked forever.</div>
+  <div class="controls">
+    <label style="display:flex;gap:8px;align-items:center;font-size:14px">
+      <input type="checkbox" id="attn-toggle" checked> show softmax weights
+    </label>
+  </div>
+  <div id="attn-grid" class="attn-grid"></div>
+</div>
+
+<h3 id="gqa">Multi-head and GQA</h3>
+<p>
+  Attention runs in parallel <strong>heads</strong> — independent subspaces, each
+  with its own q/k/v. Qwen3.8-27B: 24 query heads but only <strong>4 key/value
+  heads</strong> (<em>Grouped-Query Attention</em>): every 6 query heads share one
+  KV head. Quality barely changes, but the KV cache shrinks 6×. Head dim is 256.
+</p>
+<p>Two Qwen extras:</p>
+<ul>
+  <li><strong>q_norm / k_norm</strong>: per-head RMSNorm on q and k before RoPE
+      (stabilizes attention logits).</li>
+  <li><strong>Output gate</strong>: <code>q_proj</code> is double-width; the second
+      half of each head is a gate. After attention:
+      \( \text{out} \leftarrow \text{out} \odot \sigma(\text{gate}) \).
+      The layer learns <em>how much</em> of its attention result to write into the
+      residual stream. (Full attention uses <strong>sigmoid</strong>; linear
+      attention's norm gate uses <strong>silu</strong> — mixing them up is pitfall #3.)</li>
+</ul>
+
+<h3 id="rope">RoPE: position by rotation</h3>
+<p>
+  Attention is permutation-invariant — without help, "dog bites man" equals "man
+  bites dog". <strong>Rotary Position Embedding</strong> injects position by
+  <em>rotating</em> q and k vectors. Split a head's dims into pairs; pair \(i\) gets
+  an angle proportional to position:
+</p>
+<div class="formula-box">
+$$ \omega_i = \theta^{-2i/d_{rot}}, \qquad \text{angle} = \text{pos} \cdot \omega_i, \qquad \theta = 10^7 $$
+$$ \begin{pmatrix} x_1' \\ x_2' \end{pmatrix} = \begin{pmatrix} \cos & -\sin \\ \sin & \cos \end{pmatrix} \begin{pmatrix} x_1 \\ x_2 \end{pmatrix} $$
+</div>
+<p>
+  The magic: \(q_m \cdot k_n\) then depends only on the <em>relative</em> offset
+  \(m - n\) (rotation matrices compose). Low-index pairs rotate fast (fine local
+  resolution), high-index pairs slowly (long-range). Qwen rotates only the
+  <strong>first 64 of 256 dims</strong> (<code>partial_rotary_factor 0.25</code>);
+  the other 192 pass through untouched. The "rotate_half" layout treats
+  \((x_i, x_{i+32})\) as the pair — not adjacent elements.
+</p>
+
+<div class="widget">
+  <div class="widget-title">Interactive · RoPE rotation</div>
+  <div class="widget-sub">One frequency pair at a time. Move the position and watch the vector rotate; switch frequency index to see fast vs slow pairs.</div>
+  <div class="flex">
+    <canvas id="rope-canvas" width="320" height="320"></canvas>
+    <div style="flex:1;min-width:240px">
+      <div class="controls" style="flex-direction:column;align-items:flex-start">
+        <div class="control"><label>position: <span id="rope-pos-val">8</span></label>
+          <input type="range" id="rope-pos" min="0" max="128" value="8"></div>
+        <div class="control"><label>frequency index i: <span id="rope-freq-val">4</span></label>
+          <input type="range" id="rope-freq" min="0" max="31" value="4"></div>
+      </div>
+      <div id="rope-readout" class="readout"></div>
+    </div>
+  </div>
+</div>
+
+<h2 id="kvcache">5. The KV cache — why decode is cheap(er)</h2>
+<p>
+  When generating token \(n+1\), the keys and values of tokens \(1..n\) are
+  <em>identical</em> to what they were at step \(n\) (causality!). Recomputing them
+  would be quadratic waste. So full-attention layers append each new token's
+  (post-RoPE) k and v to a cache, and the new query attends over the whole cache:
+</p>
+<div class="formula-box">
+$$ \text{KV bytes per token} = \underbrace{2}_{K+V} \cdot \underbrace{4}_{\text{KV heads}} \cdot \underbrace{256}_{d_{head}} \cdot \text{bytes} \cdot \underbrace{16}_{\text{full layers}} $$
+</div>
+<p>
+  fp32: 128 KB/token → 4 GB at 32k context, 32 GB at 262k. Painful — and the reason
+  the hybrid design exists. Note the cache stores k <em>after</em> RoPE (position is
+  baked in; pitfall #11).
+</p>
+
+<h2 id="linear">6. Linear attention and the delta rule</h2>
+<h3 id="kernel-view">From softmax to a recurrent state</h3>
+<p>
+  Rewrite attention without softmax: \(\text{out}_t = \sum_{s \le t} (q_t \cdot k_s)\, v_s\).
+  The dot product is linear, so regroup:
+</p>
+<div class="formula-box">
+$$ \text{out}_t = q_t^\top \underbrace{\Big( \sum_{s \le t} k_s v_s^\top \Big)}_{S_t \;\in\; \mathbb{R}^{d_k \times d_v}} $$
+</div>
+<p>
+  The sum is a <strong>matrix-valued memory</strong> \(S_t\), updated recurrently:
+  \(S_t = S_{t-1} + k_t v_t^\top\). Now generation needs <em>no history at all</em> —
+  just the fixed-size matrix \(S\). Cost per token is \(O(d_k d_v)\), independent of
+  context length. This is the family of <strong>linear attention / state-space
+  models</strong> (Mamba, RWKV, DeltaNet…). The price: softmax's sharp, selective
+  retrieval is gone — everything is superposed in one matrix.
+</p>
+
+<h3 id="delta">The delta rule: memory that corrects itself</h3>
+<p>
+  Plain outer-product accumulation has a bug: writing the same key twice
+  <em>adds</em> the values instead of updating. The <strong>delta rule</strong>
+  (Widrow-Hoff, 1960!) fixes it — before writing, read what the state already
+  predicts for this key, and write only the <em>difference</em>:
+</p>
+<div class="formula-box">
+$$ \begin{aligned}
+S_t &\leftarrow e^{g_t}\, S_{t-1} && \text{(decay: old memories fade)} \\
+\text{kv} &= k_t^\top S_t && \text{(read current prediction)} \\
+\delta_t &= \beta_t\,(v_t - \text{kv}) && \text{(the correction)} \\
+S_t &\leftarrow S_t + k_t\, \delta_t^\top && \text{(write only the difference)} \\
+o_t &= q_t^\top S_t && \text{(output reads the updated state)}
+\end{aligned} $$
+</div>
+<p>
+  \(\beta_t \in (0,1)\) is a per-token learning rate ("how much to overwrite"),
+  \(g_t \le 0\) a per-token log-decay ("how fast to forget"). With \(\beta = 1\)
+  and no decay, re-writing a key <em>replaces</em> its value exactly — an
+  associative memory with <code>put(key, value)</code> semantics.
+</p>
+
+<div class="widget" id="delta-widget">
+  <div class="widget-title">Interactive · the gated delta rule, one phase at a time</div>
+  <div class="widget-sub">
+    A 4×4 state matrix and 3 tokens. Token 3 deliberately reuses token 1's key —
+    step through and watch the state get <em>corrected</em>, not doubled.
+    (Demo uses q = k; the real model has separate queries.)
+  </div>
+  <div class="flex">
+    <div>
+      <div style="font-size:12.5px;color:var(--fg-dim);margin-bottom:6px">state S (key dim × value dim)</div>
+      <div id="delta-state" class="state-grid"></div>
+      <div id="delta-vectors" style="margin-top:12px"></div>
+      <div class="controls">
+        <button id="delta-step">Step ▸</button>
+        <button id="delta-reset" class="secondary">Reset</button>
+      </div>
+      <div id="delta-readout" class="readout"></div>
+    </div>
+    <div style="flex:1;min-width:260px">
+      <div style="font-size:12.5px;color:var(--fg-dim);margin-bottom:6px">phase log</div>
+      <div id="delta-log" class="phase-log"></div>
+    </div>
+  </div>
+</div>
+
+<h3 id="gated-deltanet">Gated DeltaNet: the full recipe</h3>
+<p>Qwen3.5's linear-attention layer wraps the delta rule with learned gates:</p>
+<div class="pipeline">
+  <span class="stage">RMSNorm(h)</span><span class="arrow">→</span>
+  <span class="stage">in_proj_qkv</span><span class="arrow">→</span>
+  <span class="stage">causal conv1d (k=4) + SiLU</span><span class="arrow">→</span>
+  <span class="stage">split q,k,v</span><span class="arrow">→</span>
+  <span class="stage">L2-norm q,k · q/√128</span><span class="arrow">→</span>
+  <span class="stage">delta rule (fp32 S)</span><span class="arrow">→</span>
+  <span class="stage">RMSNormGated(·, z)</span><span class="arrow">→</span>
+  <span class="stage">out_proj</span>
+</div>
+<p>The gates come from tiny per-head projections of \(h\):</p>
+<div class="formula-box">
+$$ \beta_t = \sigma(b_t), \qquad g_t = -\,e^{A_{log}} \cdot \text{softplus}(a_t + \text{dt\_bias}) $$
+</div>
+<ul>
+  <li><strong>Decay structure</strong>: \(A_{log}\) and dt_bias are per-head learned
+      parameters; \(g \le 0\) always, so the state never explodes. Some heads learn
+      fast forgetting (local syntax), others slow (long-range facts).</li>
+  <li><strong>Short conv</strong>: a depthwise causal conv1d (kernel 4, ~4 tokens of
+      local context) with SiLU, applied to the concatenated q/k/v <em>before</em> the
+      split. Its state is just the last 4 pre-activation inputs per channel — a shift
+      register.</li>
+  <li><strong>GVA (grouped-value attention)</strong>: 16 key heads serve 48 value
+      heads (ratio 3) — q/k are repeat-interleaved so each key head drives 3
+      consecutive value heads. More memory capacity without more key parameters.</li>
+  <li><strong>L2 normalization</strong> of q and k (per head, \(\epsilon=10^{-6}\),
+      note: <em>sum</em> not mean) keeps the writes bounded; q is additionally scaled
+      by \(1/\sqrt{128}\).</li>
+  <li><strong>Output gate</strong>: per 128-dim value head,
+      \(y = \big(\text{RMSNorm}(o) \odot w\big) \odot \text{silu}(z)\) — norm
+      <em>before</em> gate, plain \(w\) (init ones), not \(1+w\).</li>
+  <li><strong>fp32 state, mandatory</strong>: the checkpoint declares
+      <code>mamba_ssm_dtype: float32</code>. The state accumulates thousands of
+      small writes; bf16's 8-bit mantissa rounds them away and quality degrades.</li>
+</ul>
+<div class="callout ok">
+  <div class="callout-title">Verified equivalence</div>
+  For long prompts the reference implementation uses a <em>chunked</em> formulation
+  (UT-transform + triangular solves, parallel over chunks). naive-inference uses the
+  simple recurrence for everything. M2 proved they agree: final states match within
+  ~1e-5 in fp32. Same math, different schedule.
+</div>
+
+<h2 id="hybrid">7. The hybrid architecture — best of both</h2>
+<p>
+  Pure linear attention is cheap but fuzzy at precise retrieval ("what was the
+  exact code in message 3?"). Pure softmax attention is sharp but its cache grows
+  forever. Qwen3.5 interleaves them: <strong>3 linear layers + 1 full layer</strong>,
+  repeated. The linear layers carry the bulk of the context cheaply; the periodic
+  full layers provide exact lookback.
+</p>
+<table>
+  <tr><th></th><th>Full attention (16 layers)</th><th>Linear attention (48 layers)</th></tr>
+  <tr><td>State</td><td>KV cache, grows with context</td><td>S [48,128,128] fp32 ≈ 3 MB/layer, <strong>constant</strong></td></tr>
+  <tr><td>State at 262k ctx (27B, fp32)</td><td>~32 GB</td><td>~150 MB total, forever</td></tr>
+  <tr><td>Retrieval</td><td>exact, content-based</td><td>associative, superposed</td></tr>
+  <tr><td>Per-token cost</td><td>O(context · d)</td><td>O(d_k · d_v), flat</td></tr>
+</table>
+
+<div class="widget">
+  <div class="widget-title">Interactive · memory vs context</div>
+  <div class="widget-sub">KV cache grows linearly; the linear-attention state is a flat line. Slide the context to 262k and compare models.</div>
+  <div class="controls">
+    <div class="control"><label>model</label>
+      <select id="mem-model"><option>4B</option><option selected>27B</option></select></div>
+    <div class="control"><label>context: <span id="mem-ctx-val">32k</span></label>
+      <input type="range" id="mem-ctx" min="1" max="256" value="32"></div>
+    <div class="control"><label>KV dtype</label>
+      <select id="mem-dtype"><option>fp32</option><option>bf16</option></select></div>
+  </div>
+  <canvas id="mem-canvas" width="640" height="280"></canvas>
+  <div id="mem-readout" class="readout"></div>
+</div>
+
+<h2 id="numerics">8. Numerics: fp32, bf16, and quantization</h2>
+<p>
+  IEEE fp32: 1 sign + 8 exponent + 23 mantissa bits. <strong>bfloat16</strong> keeps
+  the same 8-bit exponent (same dynamic range!) but truncates the mantissa to 7 bits
+  (~3 decimal digits). Training and checkpoint storage use bf16; it converts to fp32
+  with a <em>16-bit left shift</em> — lossless in that direction.
+</p>
+
+<div class="widget" id="bf16-widget">
+  <div class="widget-title">Interactive · bf16 bit explorer</div>
+  <div class="widget-sub">Type a number. See which mantissa bits survive the round-to-nearest-even truncation (faded = dropped).</div>
+  <div class="controls">
+    <input type="number" id="bf16-input" value="3.14159265" step="any" style="width:180px">
+  </div>
+  <div style="font-size:12.5px;color:var(--fg-dim)">fp32 (32 bits)</div>
+  <div id="bf16-f32" class="bits"></div>
+  <div style="font-size:12.5px;color:var(--fg-dim)">bf16 (16 bits)</div>
+  <div id="bf16-bf16" class="bits"></div>
+  <div id="bf16-readout" class="readout"></div>
+</div>
+
+<p>naive-inference's policy (and why):</p>
+<ul>
+  <li><strong>Weights are bf16 on disk</strong>, stored as <code>uint16</code> bit patterns
+      (NumPy/CuPy have no native bf16). Two regimes, chosen from the memory budget:
+      when the model fits in fp32 on the active device, every matrix is converted
+      <em>once</em> at load (fastest matmul); otherwise weights stay bf16 — on CPU as
+      zero-copy mmap views, converted inside each matmul. A 55 GB checkpoint loads instantly.</li>
+  <li><strong>Activations are fp32</strong> — simpler and more accurate than the
+      reference's bf16 activations; the oracle is therefore run in fp32 too, so
+      comparisons are tight (~1e-4).</li>
+  <li><strong>Recurrent state is fp32</strong> — non-negotiable (§6).</li>
+  <li><strong>Softmax in fp32</strong> with max-subtraction, even in bf16 pipelines.</li>
+</ul>
+<p>
+  <strong>Quantization</strong> (int8/int4) goes further: store weights as small
+  integers plus per-group scales, dequantize on the fly. It cuts the bytes read per
+  token — the decode bottleneck — roughly proportionally. It's the standard lever
+  for fitting big models on small machines (a 27B Q4 model is ~15 GB). naive-inference
+  deliberately skips it: bf16 keeps the math honest while learning.
+</p>
+
+<h2 id="sampling">9. Sampling: from logits to a token</h2>
+<p><strong>Greedy</strong> = argmax. Deterministic, repetitive. For creative text:</p>
+<div class="formula-box">
+$$ p_i = \frac{e^{z_i / T}}{\sum_j e^{z_j / T}} $$
+</div>
+<ul>
+  <li><strong>Temperature</strong> \(T\): \(T \to 0\) approaches greedy; \(T > 1\)
+      flattens the distribution (more surprise, more errors).</li>
+  <li><strong>Top-k</strong>: zero out everything outside the k highest logits,
+      renormalize.</li>
+  <li><strong>Top-p (nucleus)</strong>: keep the smallest set of top tokens whose
+      cumulative probability reaches p; renormalize. Adapts to confidence: sharp
+      distributions keep few tokens, flat ones keep many.</li>
+</ul>
+
+<div class="widget" id="sampling-widget">
+  <div class="widget-title">Interactive · sampling playground</div>
+  <div class="widget-sub">Drag logits and filters; draw 2000 samples to see the empirical distribution converge to the model's.</div>
+  <div class="controls" id="sampling-logits"></div>
+  <div class="controls">
+    <div class="control"><label>temperature: <span id="sampling-temp-val">0.80</span></label>
+      <input type="range" id="sampling-temp" min="0" max="2" step="0.05" value="0.8"></div>
+    <div class="control"><label>top-k</label>
+      <select id="sampling-topk"><option>0</option><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option></select></div>
+    <div class="control"><label>top-p: <span id="sampling-topp-val">1.00</span></label>
+      <input type="range" id="sampling-topp" min="0.1" max="1" step="0.05" value="1"></div>
+    <button id="sampling-draw">Draw 2000 samples</button>
+    <button id="sampling-clear" class="secondary">Clear</button>
+  </div>
+  <div id="sampling-bars" class="prob-bars"></div>
+  <div id="sampling-readout" class="readout"></div>
+</div>
+
+<h2 id="beyond">10. Beyond text: thinking, MTP, vision</h2>
+<ul>
+  <li><strong>Thinking blocks</strong>: Qwen3.8 is post-trained to emit
+      <code>&lt;think&gt;…&lt;/think&gt;</code> reasoning before answering. It's
+      ordinary generated text — the "reasoning" is computation bought with tokens.
+      The chat template can pre-fill an empty block to skip it.</li>
+  <li><strong>MTP (multi-token prediction)</strong>: the checkpoint ships an extra
+      1-layer head that predicts the token <em>after</em> the next one. Used as a
+      draft model for <strong>speculative decoding</strong>: propose k tokens cheaply,
+      verify them in one target-model pass, accept the matching prefix — 2–3×
+      speedups with <em>identical</em> output distribution. naive-inference ignores these
+      weights (future exercise).</li>
+  <li><strong>Vision</strong>: a 27-layer ViT-style tower encodes image patches into
+      the same residual stream via special placeholder tokens; mRoPE gives image
+      tokens 2-D positions (the three mRoPE streams T/H/W that collapse to identity
+      for pure text). Also out of scope here.</li>
+</ul>
+
+<h2 id="correctness">11. How do you know an engine is right?</h2>
+<p>
+  The methodology that made this project tractable — and the bridge to the
+  <a href="implementation.html#oracle">implementation guide</a>:
+</p>
+<ol>
+  <li><strong>Oracle</strong>: run the official implementation (HF transformers) on
+      fixed prompts and dump intermediate tensors — not just final text.</li>
+  <li><strong>Compare layer by layer</strong>, activation by activation, in the same
+      precision (fp32). A bug shows up at the exact operation that caused it.</li>
+  <li><strong>Self-consistency</strong> where no oracle is needed: prefill must equal
+      incremental decode; cached generation must equal full re-prefill.</li>
+  <li><strong>Bit-exact checks</strong> where math is lossless: bf16→fp32 embedding
+      rows must match the official reader bit for bit.</li>
+  <li><strong>Calibrated tolerances</strong>: fp32 accumulation-order noise is ~1e-5
+      per op; near-zero logits are cancellations of big dot products and need an
+      absolute floor. Tokens, however, must match <em>exactly</em>.</li>
+</ol>
+<div class="callout info">
+  <div class="callout-title">Keep reading</div>
+  The <a href="implementation.html">Implementation Guide</a> walks the actual Python code
+  for every concept on this page, with source links, and documents the numerics policy
+  and the 18-item pitfall checklist.
+</div>
+
+<div class="footer">
+  naive-inference documentation · LLM Concepts · formulas grounded in the real
+  Qwen3.8-27B config and the transformers reference implementation.
+</div>
+
+</main>
+</div>
+</body>
+</html>

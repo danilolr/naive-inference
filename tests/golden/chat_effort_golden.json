@@ -1,0 +1,202 @@
+[
+ {
+  "name": "user_only",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Solve 17*23 step by step."
+   }
+  ],
+  "thinking": true,
+  "effort": "",
+  "rendered": "<|im_start|>system\nReasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.<|im_end|>\n<|im_start|>user\nSolve 17*23 step by step.<|im_end|>\n<|im_start|>assistant\n<think>\n"
+ },
+ {
+  "name": "user_only",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Solve 17*23 step by step."
+   }
+  ],
+  "thinking": true,
+  "effort": "xhigh",
+  "rendered": "<|im_start|>system\nReasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.<|im_end|>\n<|im_start|>user\nSolve 17*23 step by step.<|im_end|>\n<|im_start|>assistant\n<think>\n"
+ },
+ {
+  "name": "user_only",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Solve 17*23 step by step."
+   }
+  ],
+  "thinking": true,
+  "effort": "medium",
+  "rendered": "<|im_start|>user\nSolve 17*23 step by step.<|im_end|>\n<|im_start|>assistant\n<think>\n"
+ },
+ {
+  "name": "user_only",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Solve 17*23 step by step."
+   }
+  ],
+  "thinking": true,
+  "effort": "low",
+  "rendered": "<|im_start|>system\nReasoning effort is set to low. Keep your thinking brief and focused, moving directly to the conclusion without unnecessary elaboration.<|im_end|>\n<|im_start|>user\nSolve 17*23 step by step.<|im_end|>\n<|im_start|>assistant\n<think>\n"
+ },
+ {
+  "name": "with_system",
+  "messages": [
+   {
+    "role": "system",
+    "content": "You are a math tutor."
+   },
+   {
+    "role": "user",
+    "content": "Hi"
+   }
+  ],
+  "thinking": true,
+  "effort": "",
+  "rendered": "<|im_start|>system\nReasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.\n\nYou are a math tutor.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n"
+ },
+ {
+  "name": "with_system",
+  "messages": [
+   {
+    "role": "system",
+    "content": "You are a math tutor."
+   },
+   {
+    "role": "user",
+    "content": "Hi"
+   }
+  ],
+  "thinking": true,
+  "effort": "xhigh",
+  "rendered": "<|im_start|>system\nReasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.\n\nYou are a math tutor.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n"
+ },
+ {
+  "name": "with_system",
+  "messages": [
+   {
+    "role": "system",
+    "content": "You are a math tutor."
+   },
+   {
+    "role": "user",
+    "content": "Hi"
+   }
+  ],
+  "thinking": true,
+  "effort": "medium",
+  "rendered": "<|im_start|>system\nYou are a math tutor.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n"
+ },
+ {
+  "name": "with_system",
+  "messages": [
+   {
+    "role": "system",
+    "content": "You are a math tutor."
+   },
+   {
+    "role": "user",
+    "content": "Hi"
+   }
+  ],
+  "thinking": true,
+  "effort": "low",
+  "rendered": "<|im_start|>system\nReasoning effort is set to low. Keep your thinking brief and focused, moving directly to the conclusion without unnecessary elaboration.\n\nYou are a math tutor.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n"
+ },
+ {
+  "name": "empty_system",
+  "messages": [
+   {
+    "role": "system",
+    "content": "   "
+   },
+   {
+    "role": "user",
+    "content": "Hi"
+   }
+  ],
+  "thinking": true,
+  "effort": "",
+  "rendered": "<|im_start|>system\nReasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n"
+ },
+ {
+  "name": "empty_system",
+  "messages": [
+   {
+    "role": "system",
+    "content": "   "
+   },
+   {
+    "role": "user",
+    "content": "Hi"
+   }
+  ],
+  "thinking": true,
+  "effort": "xhigh",
+  "rendered": "<|im_start|>system\nReasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n"
+ },
+ {
+  "name": "empty_system",
+  "messages": [
+   {
+    "role": "system",
+    "content": "   "
+   },
+   {
+    "role": "user",
+    "content": "Hi"
+   }
+  ],
+  "thinking": true,
+  "effort": "medium",
+  "rendered": "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n"
+ },
+ {
+  "name": "empty_system",
+  "messages": [
+   {
+    "role": "system",
+    "content": "   "
+   },
+   {
+    "role": "user",
+    "content": "Hi"
+   }
+  ],
+  "thinking": true,
+  "effort": "low",
+  "rendered": "<|im_start|>system\nReasoning effort is set to low. Keep your thinking brief and focused, moving directly to the conclusion without unnecessary elaboration.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n"
+ },
+ {
+  "name": "thinking_off",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Solve 17*23 step by step."
+   }
+  ],
+  "thinking": false,
+  "effort": "low",
+  "rendered": "<|im_start|>user\nSolve 17*23 step by step.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+ },
+ {
+  "name": "invalid",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Solve 17*23 step by step."
+   }
+  ],
+  "thinking": true,
+  "effort": "bogus",
+  "error": true
+ }
+]

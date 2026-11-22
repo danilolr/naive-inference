@@ -1,0 +1,12 @@
+# Oracle BASE dependencies — M0 (tokenizer) and M4 (chat template) only.
+# No torch required. For the activation/logit dumps (M1–M5) use the full
+# oracle/requirements.txt (adds torch).
+#
+# Install with uv into a separate venv:
+#   uv venv .venv-oracle
+#   uv pip install --python .venv-oracle/bin/python -r oracle/requirements-base.txt
+numpy>=1.24
+transformers>=4.57
+tokenizers>=0.20
+safetensors>=0.4
+jinja2>=3.1

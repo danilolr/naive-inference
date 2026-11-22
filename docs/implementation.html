@@ -1,0 +1,814 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Implementation Guide — naive-inference</title>
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script defer src="assets/app.js"></script>
+</head>
+<body>
+<header class="topnav">
+  <div class="brand">naive<span>-inference</span></div>
+  <nav>
+    <a href="index.html">Overview</a>
+    <a href="concepts.html">LLM Concepts</a>
+    <a href="implementation.html">Implementation</a>
+    <a href="SPEC.md">Spec (raw)</a>
+  </nav>
+  <div class="spacer"></div>
+  <button id="theme-toggle">☀️ light</button>
+</header>
+
+<div class="layout">
+<aside class="toc"><div class="toc-title">On this page</div><div id="toc"></div></aside>
+<main>
+
+<h1>Implementation Guide</h1>
+<p class="lede">
+  How naive-inference is built, module by module, with excerpts and links to every
+  source file. Assumes you can read Python; LLM concepts are explained in the
+  <a href="concepts.html">Concepts page</a> (referenced as §C throughout).
+  The normative spec is <a href="SPEC.md">docs/SPEC.md</a>; the plain-text walkthrough
+  is <a href="IMPLEMENTATION.md">docs/IMPLEMENTATION.md</a>. Sections follow its
+  reading order.
+</p>
+
+<h2 id="design">1. Design rules</h2>
+<ul>
+  <li><strong>Python + NumPy, optional CUDA via CuPy.</strong> No torch, no transformers,
+      no compiled extensions in the engine. Dependencies: NumPy + <code>regex</code>
+      (CuPy only for the CUDA backend). The server uses the stdlib
+      <code>http.server</code> — no web framework.</li>
+  <li><strong>One code path.</strong> Every module reads <code>arrays.xp</code> at call
+      time; it is bound to NumPy (CPU) or CuPy (CUDA) at startup. The same math runs
+      from a laptop to a DGX Spark (§15).</li>
+  <li><strong>Learning-first.</strong> Readable vectorized NumPy beats fast opaque code.
+      Shape errors raise (programmer errors). Comments explain <em>why</em>.</li>
+  <li><strong>Functional ops, in-place states.</strong> Vector ops return new arrays
+      (idiomatic NumPy; the matmul dominates, elementwise ops are memory-bound).
+      Recurrent <em>states</em> are preallocated and updated in place.</li>
+  <li><strong>Memory-aware weights.</strong> bf16 on disk as <code>uint16</code>;
+      converted once to fp32 when the model fits the device budget, else converted
+      per matmul — on CPU as zero-copy mmap views (§5, §13).</li>
+  <li><strong>Config-driven.</strong> Every dimension comes from <code>config.json</code>;
+      the same code runs 4B and 27B (proven in M5).</li>
+  <li><strong>Oracle-verified, separation enforced.</strong> Every milestone compares
+      against HF (§14). <a class="src-ref" href="../tests/test_no_oracle_deps.py">test_no_oracle_deps.py</a>
+      fails if any engine module imports torch/transformers/tokenizers.</li>
+</ul>
+
+<h3 id="repo-map">Repository map</h3>
+<table>
+  <tr><th>Path</th><th>Responsibility</th></tr>
+  <tr><td><a class="src-ref" href="../naive_infer/arrays.py">naive_infer/arrays.py</a></td><td>backend selection (xp = numpy | cupy), bf16↔fp32, device moves, memory budget</td></tr>
+  <tr><td><a class="src-ref" href="../naive_infer/safetensors.py">naive_infer/safetensors.py</a></td><td>header parse, mmap, zero-copy uint16 views, multi-shard index</td></tr>
+  <tr><td><a class="src-ref" href="../naive_infer/config.py">naive_infer/config.py</a></td><td>config dataclasses, validation, derived dims</td></tr>
+  <tr><td><a class="src-ref" href="../naive_infer/weights.py">naive_infer/weights.py</a></td><td>tensor resolution, tied-embedding rule, placement, LinearWeight, linear()</td></tr>
+  <tr><td><a class="src-ref" href="../naive_infer/ops.py">naive_infer/ops.py</a></td><td>RMSNorm (2 variants), SiLU, sigmoid, softplus, softmax, L2norm, RoPE</td></tr>
+  <tr><td><a class="src-ref" href="../naive_infer/state.py">naive_infer/state.py</a></td><td>KVCache, ConvState, SSMState, SeqState</td></tr>
+  <tr><td><a class="src-ref" href="../naive_infer/forward.py">naive_infer/forward.py</a></td><td>full attention, Gated DeltaNet, shared MLP, whole forward, trace</td></tr>
+  <tr><td><a class="src-ref" href="../naive_infer/model.py">naive_infer/model.py</a></td><td>Model: load, placement choice, embed, generate/generate_stream</td></tr>
+  <tr><td><a class="src-ref" href="../naive_infer/sampling.py">naive_infer/sampling.py</a></td><td>greedy, temperature, top-k, top-p (host NumPy)</td></tr>
+  <tr><td><a class="src-ref" href="../naive_infer/tokenizer/tokenizer.py">naive_infer/tokenizer/tokenizer.py</a></td><td>tokenizer.json loader, encode/decode, added tokens</td></tr>
+  <tr><td><a class="src-ref" href="../naive_infer/tokenizer/pretokenize.py">naive_infer/tokenizer/pretokenize.py</a></td><td>official pretokenization regex via the <code>regex</code> module</td></tr>
+  <tr><td><a class="src-ref" href="../naive_infer/tokenizer/bpe.py">naive_infer/tokenizer/bpe.py</a></td><td>naive ranked merge loop</td></tr>
+  <tr><td><a class="src-ref" href="../naive_infer/tokenizer/bytelevel.py">naive_infer/tokenizer/bytelevel.py</a></td><td>GPT-2 byte tables</td></tr>
+  <tr><td><a class="src-ref" href="../naive_infer/tokenizer/chat.py">naive_infer/tokenizer/chat.py</a></td><td>ChatML rendering, reasoning effort, think-stripping</td></tr>
+  <tr><td><a class="src-ref" href="../naive_infer/server.py">naive_infer/server.py</a></td><td>OpenAI-compatible API: models, chat/completions, completions, SSE</td></tr>
+  <tr><td><a class="src-ref" href="../naive_infer/cli.py">naive_infer/cli.py</a></td><td>CLI: inspect, tokenize, embeddump, generate, chat, serve</td></tr>
+  <tr><td><a class="src-ref" href="../oracle">oracle/</a></td><td>HF ground-truth scripts m0–m5 (separate deps, own venv)</td></tr>
+  <tr><td><a class="src-ref" href="../tests">tests/</a></td><td>pytest: unit + goldens + oracle comparison + CPU/GPU parity</td></tr>
+</table>
+
+<h3 id="data-flow">Data flow</h3>
+<pre><code class="language-text">text ──tokenizer.encode──&gt; ids
+ids ──Model.embed──&gt; h [seq, hidden] (fp32, device)
+h ──forward.forward──&gt; logits [seq, vocab]
+        │  for each layer in config.layer_types:
+        │    full_attention  → forward_full_layer  (KV cache)
+        │    linear_attention→ forward_linear_layer (conv + SSM state)
+        │  final RMSNorm → lm_head
+logits[-1] ──to_cpu──&gt; sampling.select ──&gt; next id ──&gt; embed ──&gt; forward ...</code></pre>
+
+<h2 id="arrays">2. arrays.py — one code path, two backends</h2>
+<a class="src-ref" href="../naive_infer/arrays.py">arrays.py</a>
+<p>
+  The whole engine is written <strong>once</strong> against <code>arrays.xp</code>, a
+  NumPy-compatible namespace. <code>select_backend</code> rebinds it at startup; every
+  module does <code>from . import arrays</code> and reads <code>arrays.xp</code>
+  <em>inside functions</em>, so import order never matters and switching backends needs
+  no code changes:
+</p>
+<pre><code class="language-python"># Active namespace and backend name. Rebound by select_backend().
+xp = np
+backend = "cpu"
+
+def select_backend(prefer: str = "auto", verbose: bool = False) -&gt; str:
+    global xp, backend
+    want_cuda = prefer == "cuda" or (prefer == "auto" and cuda_available())
+    if want_cuda:
+        # ... raise if CuPy is missing or no CUDA device is visible ...
+        xp, backend = cp, "cuda"
+    else:
+        xp, backend = np, "cpu"
+    return backend</code></pre>
+<p>
+  bf16 has no native dtype in NumPy/CuPy, so weights are <code>uint16</code> bit
+  patterns. A bf16 value is exactly the top 16 bits of an fp32 value — conversion is a
+  vectorized shift + reinterpret, identical on both backends (§C8):
+</p>
+<pre><code class="language-python">def bf16_to_fp32(u16):
+    return (u16.astype(xp.uint32) &lt;&lt; 16).view(xp.float32)   # lossless</code></pre>
+<p>
+  <code>to_device</code> / <code>to_cpu</code> cross the host/device boundary (no-ops on
+  CPU). <code>free_memory()</code> reports the placement budget: free VRAM on CUDA,
+  <code>MemAvailable</code> from <code>/proc/meminfo</code> on CPU.
+  <code>fp32_to_bf16</code> (round-to-nearest-even) exists only for tests and synthetic
+  fixtures — the engine never writes bf16.
+</p>
+<div class="callout danger">
+  <div class="callout-title">Pitfalls #15 / #16</div>
+  Never call <code>.astype(float32)</code> on a uint16 array — that interprets the
+  integer <em>value</em>, not the bit pattern. And never do
+  <code>from arrays import xp</code> at import time: the namespace is rebound by
+  <code>select_backend</code>, so a stale binding would silently keep using NumPy.
+</div>
+
+<h2 id="safetensors">3. safetensors.py — zero-copy loading</h2>
+<a class="src-ref" href="../naive_infer/safetensors.py">safetensors.py</a>
+<a class="src-ref" href="../tests/test_safetensors.py">tests</a>
+
+<p>File layout (SPEC §9):</p>
+<pre><code class="language-text">┌──────────────┬─────────────────────────┬──────────────────────────┐
+│ u64 header N │ N bytes JSON header     │ raw tensor blob          │
+│ (LE)         │ name → {dtype, shape,   │ (bf16 / f32, row-major)  │
+│              │         data_offsets}   │                          │
+└──────────────┴─────────────────────────┴──────────────────────────┘</code></pre>
+<p>
+  <code>File.open</code> mmaps a shard read-only and parses the JSON header (skipping
+  <code>__metadata__</code>). Tensors are <code>memoryview</code> slices into the
+  mapping; <code>as_uint16()</code> wraps them as NumPy arrays with <strong>no copy</strong>.
+  <code>Store.open_dir</code> resolves names across shards via
+  <code>model.safetensors.index.json</code> (2 shards for 4B, 18 for 27B). The OS page
+  cache manages residency — nothing is read until touched, so a 55 GB checkpoint loads
+  instantly. This module is host-only; device placement happens later (§5).
+</p>
+<pre><code class="language-python">mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+raw = memoryview(mm)
+header_len = struct.unpack("&lt;Q", raw[:8])[0]
+meta = json.loads(bytes(raw[8:8 + header_len]))
+
+def as_uint16(self) -&gt; np.ndarray:
+    """Interpret a 2-D BF16 tensor as a [rows, cols] uint16 view (no copy)."""
+    # ... dtype/shape checks ...
+    return np.frombuffer(self.data, dtype="&lt;u2").reshape(self.shape[0], self.shape[1])</code></pre>
+<div class="callout danger">
+  <div class="callout-title">Not everything is bf16</div>
+  The precision-sensitive linear-attention vectors <code>linear_attn.A_log</code> and
+  <code>linear_attn.norm.weight</code> are stored <strong>F32</strong> in the real
+  checkpoints (<code>dt_bias</code> is BF16). Tiny 1-D vectors are converted to fp32
+  eagerly via <code>as_fp32_vec()</code>, which handles both dtypes; matrices stay
+  uint16 until placement.
+</div>
+<p>
+  <strong>Lifecycle (pitfall #17):</strong> NumPy views export the mmap, so
+  <code>Store.close()</code> clears its tensor views first and tolerates a
+  <code>BufferError</code> if live views remain — callers drop weights before closing
+  (<code>Model.close()</code> does exactly that).
+</p>
+
+<h2 id="config">4. config.py — config-driven dimensions</h2>
+<a class="src-ref" href="../naive_infer/config.py">config.py</a>
+<a class="src-ref" href="../tests/test_config.py">tests</a>
+<p>
+  Dataclasses mirror <code>config.json</code> (the <code>text_config</code> subtree).
+  Derived helpers are methods, never constants — no model-specific numbers in the layer
+  code, so the same code runs 4B and 27B:
+</p>
+<pre><code class="language-python"># methods of TextConfig
+def key_dim(self) -&gt; int:
+    return self.linear_num_key_heads * self.linear_key_head_dim
+
+def value_dim(self) -&gt; int:
+    return self.linear_num_value_heads * self.linear_value_head_dim
+
+def conv_dim(self) -&gt; int:
+    return 2 * self.key_dim() + self.value_dim()
+
+def gva_ratio(self) -&gt; int:
+    return self.linear_num_value_heads // self.linear_num_key_heads
+
+def rotary_dim(self) -&gt; int:
+    return int(self.head_dim * self.rope.partial_rotary_factor)   # 64 of 256</code></pre>
+<p>
+  <code>validate()</code> rejects unsupported architectures and broken invariants up
+  front: <code>model_type == qwen3_5</code>, <code>layer_types</code> length matches
+  <code>num_hidden_layers</code>, GQA and GVA head divisibility,
+  <code>hidden_act == silu</code>, <code>mamba_ssm_dtype == float32</code>,
+  <code>rope_type == default</code>. The layer list comes from
+  <code>text_config.layer_types</code> — never hardcoded.
+</p>
+
+<h2 id="weights">5. weights.py — resolution and placement</h2>
+<a class="src-ref" href="../naive_infer/weights.py">weights.py</a>
+<a class="src-ref" href="../naive_infer/model.py">model.py · _choose_placement</a>
+<p>
+  <code>load_weights</code> resolves every text-model tensor as a host view (full name
+  list in SPEC §9.2). Rules: ignore <code>mtp.*</code> and <code>model.visual.*</code>;
+  <strong>tied embeddings</strong> (4B: no <code>lm_head.weight</code> → reuse
+  <code>embed_tokens</code>; 27B: separate tensor); conv weight
+  <code>[conv_dim, 1, 4]</code> squeezed to 2-D; norm vectors fp32 at load (they are
+  tiny).
+</p>
+<pre><code class="language-python">w.lm_head = w.embed if cfg.tied_embeddings() else _mat(store, "lm_head.weight")</code></pre>
+<p>
+  <code>LinearWeight</code> wraps a matrix that is either fp32 (converted once) or
+  uint16 bf16 (converted per call). <code>linear()</code> is the hot path —
+  \(y = x \cdot W^\top\) because nn.Linear weights are <code>[out, in]</code>.
+  BLAS on CPU, cuBLAS on CUDA; decode is a matrix–vector product:
+</p>
+<pre><code class="language-python">class LinearWeight:           # arr is fp32 [out,in] or uint16 bf16 [out,in]
+    def fp32(self):
+        if self.is_bf16:
+            return arrays.bf16_to_fp32(self.arr)
+        return self.arr
+
+def linear(x, w: LinearWeight):
+    """y = x @ W^T. x: [n, in] or [in]; returns [n, out] or [out]."""
+    wf = w.fp32()
+    if x.ndim == 1:
+        return wf @ x
+    return x @ wf.T</code></pre>
+<p>
+  <code>matrix_bytes</code> totals the bf16 footprint;
+  <code>model._choose_placement</code> picks (backend, dtype) from the budget, then
+  <code>materialize</code> moves weights to the device — converting to fp32 once if
+  that regime was chosen:
+</p>
+<pre><code class="language-python">for m in _iter_matrices(w):
+    dev = arrays.to_device(m.arr)  # uint16 on device (no-op view on CPU)
+    if dtype == "fp32":
+        m.arr = arrays.bf16_to_fp32(dev)
+        m.is_bf16 = False
+    else:
+        m.arr = dev
+        m.is_bf16 = True</code></pre>
+<pre><code class="language-text">bf16_bytes = total weight matrix bytes (uint16)
+fp32_bytes = 2 * bf16_bytes
+budget     = 0.9 * free_memory()      # VRAM on CUDA, MemAvailable on CPU
+
+if CUDA available and (device == "cuda" or device == "auto"):
+    if fp32_bytes &lt;= budget:  -&gt; cuda, fp32   (fastest: convert once, cuBLAS)
+    elif bf16_bytes &lt;= budget:-&gt; cuda, bf16   (convert per matmul)
+    elif device == "cuda":    -&gt; raise (use -device cpu)
+    else:                     -&gt; fall back to CPU
+CPU:
+    if fp32_bytes &lt;= budget:  -&gt; cpu, fp32    (materialize in RAM, BLAS)
+    else:                     -&gt; cpu, bf16    (zero-copy mmap, page cache)</code></pre>
+<p>
+  Every decision is logged at load (<code>[placement] cpu, weights fp32 — fp32 in RAM</code>).
+  Embedding lookup converts only the requested rows, never the whole vocab matrix.
+  Full guide: <a href="HARDWARE.md">docs/HARDWARE.md</a>.
+</p>
+
+<h2 id="ops">6. ops.py — vector primitives</h2>
+<a class="src-ref" href="../naive_infer/ops.py">ops.py</a>
+<a class="src-ref" href="../tests/test_ops.py">tests</a>
+<p>
+  Functional, fp32, backend-agnostic — one function per formula from §C3–§C6. The
+  <strong>two RMSNorm variants</strong> are the most error-prone part (SPEC §4,
+  pitfalls #1/#3). Read them side by side:
+</p>
+<pre><code class="language-python">def rms_norm(x, w, eps: float):
+    """Zero-centered Qwen3_5 RMSNorm: out = x * rsqrt(mean(x^2) + eps) * (1 + w)."""
+    xp = arrays.xp
+    ms = xp.mean(x * x, axis=-1, keepdims=True)
+    inv = 1.0 / xp.sqrt(ms + eps)
+    return x * inv * (1.0 + w)
+
+def rms_norm_gated(x, w, gate, eps: float):
+    """Gated norm of the linear-attention output, per value head (SPEC §4.2)."""
+    xp = arrays.xp
+    ms = xp.mean(x * x, axis=-1, keepdims=True)
+    inv = 1.0 / xp.sqrt(ms + eps)
+    return x * inv * w * silu(gate)</code></pre>
+<div class="callout warn">
+  <div class="callout-title">(1 + w) vs plain w</div>
+  <code>rms_norm</code> is <strong>zero-centered</strong>: weights init to 0 and the
+  scale is <code>(1 + w)</code> — using plain <code>w</code> (LLaMA style) silently
+  zeroes everything. It is used by input/post-attention norms, the final norm, and
+  per-head q/k norms. <code>rms_norm_gated</code> uses <strong>plain w</strong> (init
+  ones) and applies <strong>norm BEFORE the silu(gate)</strong> multiply — it is the
+  linear-attention output norm, per 128-dim value head. Do not mix them up.
+</div>
+<p>
+  <code>apply_rope</code> rotates only the leading <code>2*len(inv_freq)</code> dims
+  (partial RoPE, rotate_half layout — pairs are \((x_i, x_{i+32})\), not adjacent
+  elements). Angles are formed in fp32, cos/sin evaluated in fp64 and cast back,
+  matching the reference numerics:
+</p>
+<pre><code class="language-python">half = int(inv_freq.shape[0])
+rot = 2 * half
+x1 = x[..., :half]
+x2 = x[..., half:rot]
+angle = (xp.asarray(pos, dtype=xp.float32) * inv_freq).astype(xp.float64)
+cos = xp.cos(angle).astype(xp.float32)
+sin = xp.sin(angle).astype(xp.float32)
+out = x.copy()
+out[..., :half] = x1 * cos - x2 * sin
+out[..., half:rot] = x2 * cos + x1 * sin
+return out</code></pre>
+<p>
+  Also: <code>softmax</code> (max-subtraction, fp32), <code>l2norm</code>
+  (<strong>SUM, not mean</strong> — pitfall #6), <code>softplus</code> (linear above 20,
+  matching torch), <code>sigmoid</code>, <code>silu</code>,
+  <code>inv_frequencies</code> (\(\theta^{-2i/d}\), \(\theta = 10^7\)).
+</p>
+
+<h2 id="state">7. state.py — three kinds, one bundle</h2>
+<a class="src-ref" href="../naive_infer/state.py">state.py</a>
+<table>
+  <tr><th>State</th><th>Layers</th><th>Shape</th><th>Grows?</th></tr>
+  <tr><td><code>KVCache</code></td><td>full attention</td><td>[max_seq, kv_heads·head_dim] fp32, post-RoPE K / raw V</td><td>with context</td></tr>
+  <tr><td><code>ConvState</code></td><td>linear attention</td><td>[conv_dim, kernel] — PRE-activation inputs (pitfall #8)</td><td>constant</td></tr>
+  <tr><td><code>SSMState</code></td><td>linear attention</td><td>[num_v_heads, 128, 128] fp32 — the delta-rule memory</td><td>constant (~3 MB/layer, 27B)</td></tr>
+</table>
+<pre><code class="language-python">def append(self, k, v) -&gt; None:           # KVCache
+    """Store one token's key (post-RoPE) and value (raw)."""
+    if self.length &gt;= self.k.shape[0]:
+        raise IndexError("KV cache overflow")
+    self.k[self.length] = k
+    self.v[self.length] = v
+    self.length += 1
+
+# SSMState — fp32 is mandatory (mamba_ssm_dtype)
+self.s = xp.zeros(
+    (tc.linear_num_value_heads, tc.linear_key_head_dim, tc.linear_value_head_dim),
+    dtype=xp.float32,
+)</code></pre>
+<p>
+  <code>SeqState</code> bundles one state per layer according to
+  <code>layer_types</code> (slots for the other type stay <code>None</code>), plus
+  <code>pos</code>, the next position id. All allocated on the active backend and
+  reused across tokens:
+</p>
+<pre><code class="language-python">for i, lt in enumerate(tc.layer_types):
+    if lt == LAYER_FULL_ATTENTION:
+        self.kv[i] = KVCache(tc, max_seq)
+    else:
+        self.conv[i] = ConvState(tc)
+        self.ssm[i] = SSMState(tc)</code></pre>
+<p>Memory math in §C5/§C7; try the <a href="concepts.html#hybrid">calculator</a>.</p>
+
+<h2 id="forward">8. forward.py — the layer math</h2>
+<a class="src-ref" href="../naive_infer/forward.py">forward.py</a>
+<a class="src-ref" href="../tests/test_forward.py">tests (prefill ≡ decode)</a>
+
+<h3 id="full-attn">Full attention (every 4th layer)</h3>
+<p>Implements §C4 exactly, batched over the sequence, each step traceable:</p>
+<ol>
+  <li><code>ln1_out</code> — zero-centered RMSNorm over hidden.</li>
+  <li><code>q_raw/k_raw/v_raw</code> — projections; q is <strong>double-width</strong>.</li>
+  <li>Split per head: first half → query, second half → gate; <code>q_norm/k_norm</code> per head.</li>
+  <li><code>q_rot/k_rot</code> — partial RoPE at position <code>past + t</code>.</li>
+  <li>Append post-RoPE k and raw v to the KV cache (pitfall #11).</li>
+  <li>GQA: query head <code>hh</code> uses KV head <code>hh // groups</code>; causal
+      mask <code>j &lt;= past + t</code>; scores × \(256^{-0.5}\); fp32 softmax.</li>
+  <li><strong>sigmoid</strong> output gate multiply, then o_proj, residual add.</li>
+  <li>Shared <code>forward_mlp</code>: ln2 → gate/up → silu·mul → down → residual.</li>
+</ol>
+<pre><code class="language-python"># Double-width q: per head, first half query, second half gate (pitfall #2).
+qr = q_raw.reshape(seq, heads, 2 * hd)
+q = ops.rms_norm(qr[..., :hd], aw.q_norm, eps)        # [seq, heads, hd]
+gate = qr[..., hd:].reshape(seq, heads * hd)          # [seq, heads*hd]
+k = ops.rms_norm(k_raw.reshape(seq, kv_heads, hd), aw.k_norm, eps)</code></pre>
+<pre><code class="language-python"># GQA with causal masking, softmax in fp32 (pitfall #12).
+for hh in range(heads):
+    kvh = hh // groups
+    scores = (q[:, hh, :] @ k_src[:, kvh, :].T) * scale  # [seq, kv_len]
+    scores = xp.where(mask, scores, xp.float32(-xp.inf))
+    probs = ops.softmax(scores, axis=-1)
+    attn_out[:, hh, :] = probs @ v_src[:, kvh, :]
+
+# Output gate: sigmoid, NOT swish (pitfall #3).
+gate_sig = ops.sigmoid(gate)
+attn_flat = attn_flat * gate_sig</code></pre>
+
+<h3 id="linear-attn">Linear attention — Gated DeltaNet, the heart</h3>
+<p>
+  One code path for prefill <em>and</em> decode (SPEC §6.4): the recurrence is
+  position-implicit, and the conv shift register starting from zeros reproduces
+  prefill's zero left-padding. Projections are batched over the sequence; the conv and
+  the recurrence step token by token. The depthwise conv keeps
+  <strong>pre-activation</strong> inputs and applies SiLU <strong>inside</strong> the
+  conv step (pitfalls #5/#8):
+</p>
+<pre><code class="language-python">for t in range(seq):
+    win[:, :-1] = win[:, 1:]      # shift left
+    win[:, -1] = qkv_all[t]       # append new pre-activation input
+    conv_out[t] = xp.sum(win * conv_w, axis=1)  # depthwise dot product
+    mixed[t] = ops.silu(conv_out[t])</code></pre>
+<pre><code class="language-python"># beta = sigmoid(b); g = -exp(A_log) * softplus(a + dt_bias), fp32 (pitfall #7).
+beta = ops.sigmoid(b_all)                                   # [seq, nv]
+g_decay = -xp.exp(lin.a_log) * ops.softplus(a_all + lin.dt_bias)</code></pre>
+<p>
+  GVA expands q/k from 16 key heads to all value heads via
+  <strong>repeat_interleave</strong> (consecutive v-heads share a k-head — pitfall #13),
+  then L2 norm (SUM!) and the \(1/\sqrt{128}\) scale on q only (pitfall #6):
+</p>
+<pre><code class="language-python">q = xp.repeat(q, ratio, axis=1)  # [seq, nv, kd]
+k = xp.repeat(k, ratio, axis=1)
+q_normed = ops.l2norm(q, 1e-6) * q_scale
+k_normed = ops.l2norm(k, 1e-6)</code></pre>
+<p>
+  Then the delta rule itself (§C6): fp32 state <code>S [nv, kd, vd]</code>, token loop,
+  vectorized over heads with <code>einsum</code>:
+</p>
+<pre><code class="language-python">for t in range(seq):
+    decay = xp.exp(g_decay[t])                 # [nv]
+    s *= decay[:, None, None]                  # decay whole state
+    k_t, q_t, v_t = k_normed[t], q_normed[t], v[t]
+    kv_mem = xp.einsum("hkv,hk-&gt;hv", s, k_t)   # what state already predicts
+    delta = (v_t - kv_mem) * beta[t][:, None]  # correction
+    s += xp.einsum("hk,hv-&gt;hkv", k_t, delta)   # write correction
+    core_out[t] = xp.einsum("hkv,hk-&gt;hv", s, q_t)  # read UPDATED state</code></pre>
+<p>
+  Followed by per-head <code>rms_norm_gated</code> with gate z (plain w, silu gate),
+  out_proj, residual, shared MLP. The trace captures both final states — which is how
+  M2 proved the recurrence ≡ the model's chunked prefill formulation (~1e-5).
+</p>
+<div class="callout warn">
+  <div class="callout-title">Order matters</div>
+  decay → read kᵀS → delta → outer-product write → output. The output reads the state
+  <em>after</em> the current token's write (pitfall #9). q/k L2-norm happens
+  <em>after</em> GVA repeat-interleave, in fp32, before the \(1/\sqrt{128}\) scale.
+</div>
+
+<h3 id="whole-forward">Whole forward + trace</h3>
+<pre><code class="language-python">for li, lt in enumerate(model.cfg.text.layer_types):
+    ltr = {} if tr is not None else None
+    if lt == LAYER_FULL_ATTENTION:
+        forward_full_layer(model, li, h, st.pos, st.kv[li], ltr)
+    else:
+        forward_linear_layer(model, li, h, st.conv[li], st.ssm[li], ltr)
+    # ... namespace layer traces as l{i}_{name} ...
+st.pos += h.shape[0]
+# final zero-centered RMSNorm -&gt; lm_head -&gt; logits [seq, vocab]</code></pre>
+<p>
+  The optional <code>trace</code> dict records a copy of each intermediate — no-op when
+  <code>None</code>, zero instrumentation of production code. This is what made the
+  activation-by-activation oracle comparisons possible (§14):
+</p>
+<pre><code class="language-python">def put(tr, name, arr):
+    """Record a copy of arr under name (no-op when tr is None)."""
+    if tr is not None:
+        tr[name] = arr.copy()</code></pre>
+
+<h2 id="generation">9. model.py + sampling.py — generation</h2>
+<a class="src-ref" href="../naive_infer/model.py">model.py</a>
+<a class="src-ref" href="../naive_infer/sampling.py">sampling.py</a>
+<a class="src-ref" href="../tests/test_sampling.py">tests</a>
+<p>
+  <code>Model.load</code> orchestrates config → store → host weights → placement →
+  materialize:
+</p>
+<pre><code class="language-python">cfg = load_config(directory)
+store = Store.open_dir(directory)
+host_w = weights.load_weights(cfg, store)
+backend, dtype = _choose_placement(host_w, device, weight_dtype, verbose)
+w = weights.materialize(host_w, dtype)</code></pre>
+<p>
+  <code>generate_stream</code> is the autoregressive loop: prefill → select → embed one
+  token → forward → repeat. The last logits row comes back to host NumPy for sampling;
+  a per-token callback drives streaming UIs (returning <code>False</code> aborts); stop
+  ids are checked after the callback. <code>generate</code> is the <code>None</code>-callback wrapper.
+</p>
+<pre><code class="language-python">st = SeqState(self.cfg.text, len(prompt) + max_new)
+h = self.embed(prompt)
+logits = self.forward(h, st, None)
+out = []
+for i in range(max_new):
+    last = arrays.to_cpu(logits[-1])
+    next_id = sampling.select(last, p, rng)
+    out.append(next_id)
+    # ... on_token callback; early return on stop ids ...
+    if i + 1 &lt; max_new:
+        h = self.embed([next_id])
+        logits = self.forward(h, st, None)
+return out</code></pre>
+<p>
+  Sampling mirrors §C9 and runs on host NumPy (backend-agnostic): temperature-scaled
+  copy, stable rank sort, top-k cut, nucleus prefix, softmax, categorical draw. Greedy
+  (\(T \le 0\)) is the oracle-validated path:
+</p>
+<pre><code class="language-python">def select(logits, p: Params, rng) -&gt; int:
+    if p.temperature &lt;= 0:
+        return greedy(logits)
+    scaled = np.asarray(logits, dtype=np.float64) / p.temperature
+    order = np.argsort(-scaled, kind="stable")
+    keep = len(order)
+    if 0 &lt; p.top_k &lt; keep:
+        keep = p.top_k
+    # ... top-p nucleus prefix, softmax over the prefix, categorical draw ...</code></pre>
+
+<h2 id="tokenizer-impl">10. tokenizer/ — text ↔ ids</h2>
+<a class="src-ref" href="../naive_infer/tokenizer/tokenizer.py">tokenizer.py</a>
+<a class="src-ref" href="../naive_infer/tokenizer/pretokenize.py">pretokenize.py</a>
+<a class="src-ref" href="../naive_infer/tokenizer/bpe.py">bpe.py</a>
+<a class="src-ref" href="../naive_infer/tokenizer/bytelevel.py">bytelevel.py</a>
+<a class="src-ref" href="../naive_infer/tokenizer/chat.py">chat.py</a>
+<a class="src-ref" href="../tests/test_tokenizer.py">golden tests</a>
+
+<h3 id="pretokenizer">The pretokenizer: official regex, verbatim</h3>
+<p>
+  Python's <code>regex</code> module supports <code>\p{...}</code> and lookahead (the
+  stdlib <code>re</code> does not), so the official Qwen pattern from
+  <code>tokenizer_config.json</code> is used <strong>verbatim</strong> — no hand-written
+  scanner needed:
+</p>
+<pre><code class="language-python">PATTERN = regex.compile(
+    r"(?i:'s|'t|'re|'ve|'m|'ll|'d)"
+    r"|[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+"
+    r"|\p{N}"
+    r"| ?[^\s\p{L}\p{M}\p{N}]+[\r\n]*"
+    r"|\s*[\r\n]+"
+    r"|\s+(?!\S)"
+    r"|\s+"
+)
+
+def pretokenize(s: str) -&gt; list[str]:
+    return [m.group(0) for m in PATTERN.finditer(s)]</code></pre>
+
+<h3 id="bpe-impl">BPE and byte tables</h3>
+<p>
+  <code>bpe.py</code>: naive loop — find the lowest-rank adjacent pair, merge
+  <strong>all</strong> its occurrences left-to-right, repeat. O(n²) and proud of it.
+  <code>bytelevel.py</code> rebuilds the GPT-2 table algorithmically (printable bytes
+  map to themselves; the rest get code points from U+0100).
+</p>
+<pre><code class="language-python">while True:
+    best_rank = None
+    best_pair = None
+    for i in range(len(symbols) - 1):
+        pair = (symbols[i], symbols[i + 1])
+        rank = ranks.get(pair)
+        if rank is not None and (best_rank is None or rank &lt; best_rank):
+            best_rank, best_pair = rank, pair
+    if best_pair is None:
+        break
+    # ... merge ALL occurrences of best_pair left-to-right, then loop ...</code></pre>
+<p>
+  <code>encode</code>: split added (special) tokens literally, longest first → NFC on
+  the gaps (stdlib <code>unicodedata</code>) → pretokenize → byte-encode → BPE → vocab
+  lookup. No BOS is prepended. <code>decode_bytes</code> returns raw bytes, which is
+  what makes UTF-8-safe incremental streaming possible.
+</p>
+<pre><code class="language-python">normalized = unicodedata.normalize("NFC", seg)
+for pretok in pretokenize(normalized):
+    for piece in bpe(byte_encode(pretok), self.ranks):
+        tid = self.vocab.get(piece)
+        if tid is None:
+            raise ValueError(f"piece {piece!r} not in vocab")
+        ids.append(tid)</code></pre>
+
+<h3 id="chat-impl">Chat template, effort, streaming</h3>
+<p>
+  <code>chat.py</code> renders the text-only ChatML subset. The generation prompt opens
+  a think block; disabled thinking pre-fills it empty so the model answers directly.
+  Assistant history turns get <code>_strip_thinking</code> (keep everything after the
+  <em>last</em> closing think tag). Validated against HF
+  <code>apply_chat_template</code> goldens.
+</p>
+<pre><code class="language-python">if opts.add_generation_prompt:
+    parts.append(f"&lt;|im_start|&gt;assistant\n{THINK_OPEN}\n")
+    if not opts.enable_thinking:
+        parts.append(f"\n{THINK_CLOSE}\n\n")
+
+def _strip_thinking(content: str) -&gt; str:
+    """Keep everything after the LAST closing think tag (official logic)."""
+    idx = content.rfind(THINK_CLOSE)
+    if idx &gt;= 0:
+        return content[idx + len(THINK_CLOSE):].lstrip("\n")
+    return content</code></pre>
+<p>
+  <strong>Reasoning effort</strong> (Qwen3.8): <code>reasoning_effort</code> ∈
+  {<code>xhigh</code> (default), <code>medium</code>, <code>low</code>} injects a
+  verbatim instruction from the official <code>chat_template.jinja</code> into the
+  system turn — prepended to an existing system message, or becoming one when none
+  exists. <code>medium</code> injects nothing; thinking-off ignores the field entirely;
+  other values raise. It is <em>prompt conditioning</em>, not a token budget. The 4B
+  template predates effort (its goldens use <code>medium</code>).
+</p>
+<p>
+  <strong>UTF-8 subtlety:</strong> byte-level pieces can split a rune across tokens
+  (<code>"Ol"</code> + <code>"á"</code>-as-bytes). The chat CLI uses an incremental
+  UTF-8 decoder (<code>codecs.getincrementaldecoder</code>); the server decodes all ids
+  so far and trims an incomplete trailing rune — no replacement-character flicker.
+</p>
+
+<h2 id="server">11. server.py — OpenAI-compatible API</h2>
+<a class="src-ref" href="../naive_infer/server.py">server.py</a>
+<a class="src-ref" href="../tests/test_server.py">tests</a>
+<p>
+  <code>naive-infer serve -model NAME -addr HOST:PORT</code> exposes the engine over
+  HTTP with the stdlib <code>http.server</code> only:
+</p>
+<table>
+  <tr><th>Endpoint</th><th>Behavior</th></tr>
+  <tr><td><code>GET /v1/models</code></td><td>lists the loaded model (directory base name as id)</td></tr>
+  <tr><td><code>POST /v1/chat/completions</code></td><td>ChatML render → generate; <code>stream:true</code> emits SSE <code>chat.completion.chunk</code> deltas + <code>[DONE]</code>; thinking text goes to <code>reasoning_content</code>, answer to <code>content</code></td></tr>
+  <tr><td><code>POST /v1/completions</code></td><td>raw prompt continuation (<code>text_completion</code>, streaming too)</td></tr>
+  <tr><td><code>GET /healthz</code></td><td>liveness</td></tr>
+</table>
+<p>
+  Request fields: <code>messages</code> (required for chat), <code>model</code>,
+  <code>max_tokens</code> (default 256), <code>temperature</code> (0 = greedy),
+  <code>top_p</code>, <code>top_k</code>, <code>stop</code> (string or array, matched on
+  decoded text), <code>seed</code>, <code>stream</code>, <code>enable_thinking</code>
+  (default true), <code>reasoning_effort</code>, <code>n</code> (only 1). Responses
+  carry OpenAI-shaped <code>usage</code> and <code>finish_reason</code>
+  (<code>stop</code>/<code>length</code>); errors use the
+  <code>{"error":{message,type,code}}</code> envelope (400/404). Every request is logged
+  on arrival (<code>[req]</code>) and with statistics on completion
+  (<code>[res]</code>: duration, prompt/completion tokens, tok/s, finish reason).
+</p>
+<p>
+  The streaming core decodes the full generation each token, trims incomplete UTF-8,
+  splits think blocks, and emits only the deltas:
+</p>
+<pre><code class="language-python">def _trim_utf8(b: bytes) -&gt; str:
+    while b:
+        try:
+            return b.decode("utf-8")
+        except UnicodeDecodeError:
+            b = b[:-1]
+    return ""
+
+def emit(dr, dc):                    # SSE delta for /v1/chat/completions
+    d = {}
+    if dr:
+        d["reasoning_content"] = dr
+    if dc:
+        d["content"] = dc
+    chunk(d)</code></pre>
+<div class="callout warn">
+  <div class="callout-title">Two subtleties</div>
+  <strong>Think splitting:</strong> the think OPEN tag lives in the <em>prompt</em>
+  (template), so generated reasoning arrives without it — <code>_split_think</code>
+  takes an <code>in_think</code> flag from the request, and
+  <code>_trailing_partial</code> withholds trailing incomplete tags so streaming never
+  emits half a tag. <strong>Concurrency:</strong> generation is CPU/GPU-bound, so a
+  <code>threading.Lock</code> serializes it (concurrent requests queue); weights and
+  tokenizer are read-only and shared safely.
+</div>
+
+<h2 id="cli">12. cli.py — the user-facing surface</h2>
+<a class="src-ref" href="../naive_infer/cli.py">cli.py</a>
+<table>
+  <tr><th>Command</th><th>Purpose</th></tr>
+  <tr><td><code>inspect</code></td><td>config summary; <code>-tensors</code> lists all weights; <code>-embed ID</code> prints an embedding row</td></tr>
+  <tr><td><code>tokenize</code></td><td>encode (<code>-pieces</code> shows byte-level symbols) / <code>-decode</code> ids</td></tr>
+  <tr><td><code>embeddump</code></td><td>raw fp32 LE rows for the bit-exact oracle check</td></tr>
+  <tr><td><code>generate</code></td><td>raw completion; greedy default, <code>-temp/-top-k/-top-p/-seed</code></td></tr>
+  <tr><td><code>chat</code></td><td>ChatML REPL, streaming, <code>-system</code>, <code>-no-think</code>, <code>-effort</code>, <code>/exit</code> <code>/reset</code></td></tr>
+  <tr><td><code>serve</code></td><td>OpenAI-compatible API server, <code>-addr</code>, graceful SIGINT/SIGTERM shutdown</td></tr>
+</table>
+<p>
+  <code>-device {auto,cpu,cuda}</code> and <code>-weight-dtype {auto,bf16,fp32}</code>
+  control placement on every model-loading command.
+</p>
+<h3 id="env">Model directory resolution: NAIVE_INFER_MODELS</h3>
+<pre><code class="language-python">root = os.environ.get("NAIVE_INFER_MODELS") or "models"
+if os.path.isabs(flag_val) or "/" in flag_val or "\\" in flag_val:
+    return flag_val
+return os.path.join(root, flag_val)</code></pre>
+<p>
+  A bare <code>-model NAME</code> resolves to <code>$NAIVE_INFER_MODELS/NAME</code>;
+  when the variable is unset the root defaults to <code>./models</code>. Explicit
+  paths pass through untouched. Applied uniformly to all commands.
+</p>
+
+<h2 id="numerics">13. Numerics policy (SPEC §2)</h2>
+<ul>
+  <li><strong>Weights</strong>: bf16 on disk, stored as little-endian <code>uint16</code>.
+      Conversion is the vectorized shift <code>(u16 &lt;&lt; 16).view(fp32)</code> — lossless,
+      identical on NumPy and CuPy. Two regimes from the memory budget: <strong>fp32
+      weights</strong> (converted once at load, fastest matmul) when the model fits;
+      <strong>bf16 weights</strong> (converted inside each <code>linear()</code> call,
+      half the memory) otherwise. On CPU, bf16 keeps the mmap advantage.</li>
+  <li><strong>Activations</strong>: fp32 everywhere, on both backends — simpler and more
+      accurate than bf16 activations; the oracle therefore runs in fp32 too, so
+      comparisons are tight (~1e-4 relative per activation).</li>
+  <li><strong>Recurrent SSM state</strong>: fp32, mandatory
+      (<code>mamba_ssm_dtype: float32</code>). Downcasting degrades quality.</li>
+  <li><strong>Matmul</strong>: <code>x @ Wᵀ</code> — multithreaded BLAS on CPU
+      (OpenBLAS/MKL), cuBLAS on CUDA. The decode hot path is a matrix–vector product.</li>
+  <li><strong>Softmax in fp32</strong> with max subtraction; RoPE angles fp32, cos/sin
+      fp64; softplus linear above 20; L2 norm uses SUM.</li>
+  <li><strong>M5 exception</strong>: the 27B oracle runs in bf16 (fp32 ~108 GB &gt; RAM),
+      so its logits use bf16 tolerance and the primary check is exact token ids.</li>
+</ul>
+
+<h2 id="oracle">14. Oracle methodology — how correctness was proven</h2>
+<a class="src-ref" href="../oracle">oracle/ scripts</a>
+<a class="src-ref" href="../oracle/README.md">oracle/README.md</a>
+<a class="src-ref" href="../tests/helpers.py">tests/helpers.py</a>
+<p>
+  Each milestone has a Python script that dumps ground truth from HF transformers
+  (fp32, eager attention) into <code>.npy</code> files, and a pytest that compares the
+  engine's <code>trace</code> activations against them — layer by layer, not just final
+  text. The oracle has <strong>its own venv and requirements</strong>
+  (torch/transformers/tokenizers). The tokenizer/chat goldens (<code>tests/golden/</code>)
+  ship with the project; the activation/logit dumps (<code>oracle/dumps/</code>) are
+  git-ignored (~51 MB) and regenerated with the oracle scripts (needs torch). Tests skip
+  gracefully when weights or dumps are absent.
+</p>
+<table>
+  <tr><th>Script</th><th>Dumps</th><th>Test</th><th>Result</th></tr>
+  <tr><td><a href="../oracle/m0_dump.py">m0_dump.py</a> + <a href="../oracle/m0_embed_check.py">m0_embed_check.py</a></td><td>token ids; embedding rows via the official safetensors reader</td><td><a href="../tests/test_tokenizer.py">test_tokenizer.py</a> + embeddump</td><td>bit-exact rows; HF goldens (NFC, CJK, emoji, special tokens, both models)</td></tr>
+  <tr><td><a href="../oracle/m1_dump.py">m1_dump.py</a></td><td>one full-attention layer, prefill + cached decode</td><td><a href="../tests/test_oracle_m1.py">test_oracle_m1.py</a></td><td>36/36 activations match, maxAbs ~1e-5</td></tr>
+  <tr><td><a href="../oracle/m2_dump.py">m2_dump.py</a></td><td>one Gated DeltaNet layer incl. real cache states</td><td><a href="../tests/test_oracle_m2.py">test_oracle_m2.py</a></td><td>46/46 activations/states, maxAbs ~1e-5; recurrence ≡ chunked prefill</td></tr>
+  <tr><td><a href="../oracle/m3_dump.py">m3_dump.py</a></td><td>prefill logits + 20 greedy steps (4B)</td><td><a href="../tests/test_oracle_m3.py">test_oracle_m3.py</a></td><td>exact tokens; logits maxAbs ~5e-5; re-prefill ≡ cached</td></tr>
+  <tr><td><a href="../oracle/m4_chat.py">m4_chat.py</a></td><td>apply_chat_template renderings</td><td><a href="../tests/test_chat.py">test_chat.py</a></td><td>identical strings (thinking on/off, effort, think-stripping)</td></tr>
+  <tr><td><a href="../oracle/m5_dump.py">m5_dump.py</a></td><td>27B bf16 greedy (fp32 oracle impossible: ~108 GB)</td><td><a href="../tests/test_oracle_m5.py">test_oracle_m5.py</a></td><td>exact tokens across all 64 layers; 1199 tensors / 18 shards; untied embeddings</td></tr>
+</table>
+<p>
+  <strong>Tolerances:</strong> fp32 accumulation-order noise is ~1e-5 per op; expected
+  agreement ~1e-4 relative per activation. Near-zero logits are cancellations of big
+  dot products and need an absolute floor. Tokens, however, must match
+  <em>exactly</em> — and they do (M3: 20 tokens; M5: greedy ids identical to the bf16
+  oracle). <code>tests/helpers.flat</code> flattens head-major oracle dumps to 2-D,
+  matching the engine's layout. Self-consistency tests
+  (<a href="../tests/test_forward.py">test_forward.py</a>) need no oracle: prefill must
+  equal incremental decode.
+</p>
+
+<h2 id="parity">15. CPU/GPU parity — one code path, verified</h2>
+<a class="src-ref" href="../tests/test_cpu_gpu_parity.py">test_cpu_gpu_parity.py</a>
+<a class="src-ref" href="../naive_infer/arrays.py">arrays.py</a>
+<p>
+  Because every module reads <code>arrays.xp</code> at call time, the CUDA path is the
+  <em>same code</em> — only the namespace and the weight placement differ.
+  <code>test_cpu_gpu_parity.py</code> runs tiny <strong>synthetic models</strong> on both
+  backends and compares (it skips without CUDA). Verified on an RTX 4060; real 4B/27B
+  weights exceed its 8 GB VRAM, so full-model GPU runs target larger/unified memory.
+</p>
+<p>
+  On a <strong>DGX Spark</strong> (128 GB unified memory, CUDA 13,
+  <code>cupy-cuda13x[ctk]</code>) the validation procedure is: backend sanity check →
+  synthetic parity → real-weight correctness (M1/M2 layer oracles with
+  <code>-device cuda</code>, or M3/M5 greedy token ids vs the oracle dumps) → full 27B
+  generation. The 27B model fits in fp32 in unified memory, so weights are converted
+  once and matmul runs on cuBLAS — no per-call conversion, no page faults. Step-by-step
+  commands: <a href="HARDWARE.md">docs/HARDWARE.md</a>.
+</p>
+<div class="callout info">
+  <div class="callout-title">CuPy 14 needs CUDA headers (pitfall #18)</div>
+  Install the <code>[ctk]</code> extra — <code>cupy-cuda12x[ctk]</code> /
+  <code>cupy-cuda13x[ctk]</code> (the <code>requirements-cuda12.txt</code> /
+  <code>requirements-cuda13.txt</code> files include this) — or set <code>CUDA_PATH</code>,
+  otherwise JIT kernels fail to compile.
+</div>
+
+<h2 id="pitfalls">16. Pitfall checklist (SPEC §12)</h2>
+<p>
+  The 18 traps from the spec — 14 architecture pitfalls plus 4 Python/NumPy/CuPy-specific
+  ones — with where each lives in the code:
+</p>
+<table>
+  <tr><th>#</th><th>Pitfall</th><th>Code</th></tr>
+  <tr><td>1</td><td>RMSNorm is (1+w), weights init 0</td><td><a href="../naive_infer/ops.py">ops.py · rms_norm</a></td></tr>
+  <tr><td>2</td><td>q_proj double-width: query | gate per head</td><td><a href="../naive_infer/forward.py">forward.py</a></td></tr>
+  <tr><td>3</td><td>full gate = sigmoid; linear norm gate = silu; plain w vs (1+w)</td><td>forward.py / ops.py</td></tr>
+  <tr><td>4</td><td>RoPE on first 64 dims only, rotate_half layout</td><td><a href="../naive_infer/ops.py">ops.py · apply_rope</a></td></tr>
+  <tr><td>5</td><td>SiLU inside conv step, before q/k/v split</td><td><a href="../naive_infer/forward.py">forward.py</a></td></tr>
+  <tr><td>6</td><td>L2 norm (SUM!) + 1/√128 after GVA, fp32</td><td>forward.py / ops.py · l2norm</td></tr>
+  <tr><td>7</td><td>g = −exp(A_log)·softplus(a+dt_bias), ≤ 0</td><td>forward.py</td></tr>
+  <tr><td>8</td><td>conv window stores PRE-activation inputs</td><td><a href="../naive_infer/state.py">state.py · ConvState</a></td></tr>
+  <tr><td>9</td><td>delta order; output reads UPDATED state</td><td>forward.py</td></tr>
+  <tr><td>10</td><td>tied embeddings: 4B yes, 27B no</td><td><a href="../naive_infer/weights.py">weights.py</a></td></tr>
+  <tr><td>11</td><td>KV cache stores post-RoPE keys</td><td>forward.py / state.py</td></tr>
+  <tr><td>12</td><td>softmax in fp32</td><td><a href="../naive_infer/ops.py">ops.py · softmax</a></td></tr>
+  <tr><td>13</td><td>GVA is repeat_interleave, not tile</td><td>forward.py (xp.repeat)</td></tr>
+  <tr><td>14</td><td>no BOS; stop on 248046 / 248044</td><td><a href="../naive_infer/tokenizer/tokenizer.py">tokenizer.py</a>, <a href="../naive_infer/model.py">model.py · STOP_IDS</a></td></tr>
+  <tr><td>15</td><td>bf16 is uint16, not a dtype: shift, never .astype(float32)</td><td><a href="../naive_infer/arrays.py">arrays.py · bf16_to_fp32</a></td></tr>
+  <tr><td>16</td><td>read arrays.xp at call time, not import time</td><td><a href="../naive_infer/arrays.py">arrays.py</a> (all modules)</td></tr>
+  <tr><td>17</td><td>mmap lifecycle: drop views before close (BufferError)</td><td><a href="../naive_infer/safetensors.py">safetensors.py · close</a></td></tr>
+  <tr><td>18</td><td>CuPy 14 needs CUDA headers: [ctk] extra or CUDA_PATH</td><td><a href="HARDWARE.md">HARDWARE.md</a></td></tr>
+</table>
+
+<div class="footer">
+  naive-inference documentation · Implementation Guide · every claim on this page is
+  backed by a linked source file and a passing test.
+</div>
+
+</main>
+</div>
+</body>
+</html>

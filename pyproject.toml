@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "naive-inference"
+version = "0.1.0"
+description = "A from-scratch, learning-first inference engine for Qwen3.5/3.8 (qwen3_5) in Python + NumPy, with optional CUDA via CuPy."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = [
+    "numpy>=1.24",
+    "regex>=2023.10",
+]
+
+[project.optional-dependencies]
+# CUDA backends. Preferred install is via the requirements files with uv:
+#   uv pip install -r requirements-cuda12.txt   # x86 + CUDA 12 (e.g. RTX 4060)
+#   uv pip install -r requirements-cuda13.txt   # DGX Spark (ARM + CUDA 13)
+# These extras are an equivalent alternative (uv pip install -e ".[cuda12]").
+# The engine code is identical; only the CuPy wheel differs.
+cuda12 = ["cupy-cuda12x[ctk]>=13.3"]
+cuda13 = ["cupy-cuda13x[ctk]>=13.6"]
+dev = ["pytest>=7.4", "threadpoolctl>=3.2"]
+
+[project.scripts]
+naive-infer = "naive_infer.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["naive_infer*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

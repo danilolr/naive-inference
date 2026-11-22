@@ -1,0 +1,4 @@
+# Optional CUDA backend for x86 + a CUDA 12 driver (e.g. RTX 4060).
+# The [ctk] extra pulls the CUDA toolkit headers CuPy 14 needs to JIT kernels.
+# Install:  uv pip install -r requirements-cuda12.txt
+cupy-cuda12x[ctk]>=13.3

@@ -1,0 +1,13 @@
+# Engine runtime + development dependencies (CPU).
+#
+# Install with uv (creates the CLI entry point too):
+#   uv venv
+#   uv pip install -r requirements.txt -e .
+#
+# Optional CUDA backend — install ONE matching your platform (see below):
+#   uv pip install -r requirements-cuda12.txt   # x86 + CUDA 12 driver
+#   uv pip install -r requirements-cuda13.txt   # DGX Spark (ARM + CUDA 13)
+numpy>=1.24
+regex>=2023.10
+pytest>=7.4
+threadpoolctl>=3.2
